@@ -15,7 +15,7 @@ interface ModelConfig {
 	providerId?: string;
 	apiModel?: string;
 	name?: string;
-	endpoint?: string;
+	baseUrl?: string;
 	family?: string;
 	version?: string;
 	maxInputTokens?: number;
@@ -32,7 +32,7 @@ interface ModelConfig {
 interface ProviderProfileConfig {
 	id: string;
 	name: string;
-	endpoint: string;
+	baseUrl: string;
 	apiKey: string;
 	requireApiKey: boolean;
 	apiKeyHeader: string;
@@ -169,8 +169,8 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			return [];
 		}
 
-		const missingEndpointProfiles = config.profiles.filter((profile) => !hasUsableEndpoint(profile));
-		const usableProfiles = config.profiles.filter((profile) => hasUsableEndpoint(profile));
+		const missingBaseUrlProfiles = config.profiles.filter((profile) => !hasUsableBaseUrl(profile));
+		const usableProfiles = config.profiles.filter((profile) => hasUsableBaseUrl(profile));
 		if (config.profiles.length === 0) {
 			if (!options.silent) {
 				void vscode.window.showWarningMessage(
@@ -182,16 +182,16 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 		if (usableProfiles.length === 0) {
 			if (!options.silent) {
 				void vscode.window.showWarningMessage(
-					'Custom OpenAI Responses provider is missing an endpoint. Configure copilotCustomProvider.profiles.'
+					'Custom OpenAI Responses provider is missing a baseUrl. Configure copilotCustomProvider.profiles[].baseUrl.'
 				);
 			}
 			return [];
 		}
 
 		if (!options.silent) {
-			if (missingEndpointProfiles.length > 0) {
+			if (missingBaseUrlProfiles.length > 0) {
 				this.output.appendLine(
-					`Skipped profiles without endpoint: ${missingEndpointProfiles.map((profile) => profile.id).join(', ')}`
+					`Skipped profiles without baseUrl: ${missingBaseUrlProfiles.map((profile) => profile.id).join(', ')}`
 				);
 			}
 		}
@@ -217,9 +217,9 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(`Profile "${model.config.profileId}" is no longer configured.`);
 		}
 
-		const endpoint = model.config.model.endpoint || profile.endpoint;
-		if (!endpoint) {
-			throw new Error(`Missing endpoint for profile "${profile.id}".`);
+		const requestUrl = resolveResponsesRequestUrl(model.config.model.baseUrl || profile.baseUrl);
+		if (!requestUrl) {
+			throw new Error(`Missing baseUrl for profile "${profile.id}".`);
 		}
 		if (profile.requireApiKey && !profile.apiKey) {
 			throw new Error(`Missing API key for profile "${profile.id}". Run "Custom OpenAI Responses: Set API Key".`);
@@ -231,11 +231,11 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 
 		if (config.logRequests) {
 			this.output.appendLine(
-				`[${requestId}] ${body.stream ? 'stream' : 'non-stream'} request profile=${profile.id} model=${body.model} endpoint=${endpoint}`
+				`[${requestId}] ${body.stream ? 'stream' : 'non-stream'} request profile=${profile.id} model=${body.model} url=${requestUrl}`
 			);
 		}
 
-		const response = await fetchWithRetry(endpoint, {
+		const response = await fetchWithRetry(requestUrl, {
 			method: 'POST',
 			headers,
 			body: JSON.stringify(body),
@@ -375,8 +375,8 @@ function secretKey(name: string): string {
 	return `${secretPrefix}${name || 'default'}`;
 }
 
-function hasUsableEndpoint(profile: ProviderProfileConfig): boolean {
-	return Boolean(profile.endpoint || profile.models.some((model) => trim(model.endpoint || '').length > 0));
+function hasUsableBaseUrl(profile: ProviderProfileConfig): boolean {
+	return Boolean(profile.baseUrl || profile.models.some((model) => trim(model.baseUrl || '').length > 0));
 }
 
 function toLanguageModelInformation(
@@ -386,8 +386,9 @@ function toLanguageModelInformation(
 	seenProviderModelIds?: Set<string>
 ): CustomLanguageModel {
 	const effort = normalizeReasoningEffort(model.reasoningEffort, config.defaultReasoningEffort);
-	const endpoint = model.endpoint || profile.endpoint;
-	const displayModelName = formatModelName(profile, model, effort, endpoint, config.modelNameTemplate);
+	const baseUrl = model.baseUrl || profile.baseUrl;
+	const requestUrl = resolveResponsesRequestUrl(baseUrl);
+	const displayModelName = formatModelName(profile, model, effort, baseUrl, config.modelNameTemplate);
 
 	const preferredProviderModelId = model.providerId || buildProviderModelId(profile.id, model.id);
 	const providerModelId = seenProviderModelIds
@@ -395,8 +396,11 @@ function toLanguageModelInformation(
 		: preferredProviderModelId;
 	const tooltipLines = [
 		`Reasoning effort: ${effort}`,
-		`Endpoint: ${endpoint ? hostnameOrEndpoint(endpoint) : 'not set'}`
+		`Base URL: ${baseUrl ? hostnameOrUrl(baseUrl) : 'not set'}`
 	];
+	if (requestUrl && requestUrl !== baseUrl) {
+		tooltipLines.push(`Request URL: ${requestUrl}`);
+	}
 	if (profile.requireApiKey && !profile.apiKey) {
 		tooltipLines.push('API key: not set');
 	}
@@ -428,7 +432,7 @@ function formatModelName(
 	profile: ProviderProfileConfig,
 	model: ModelConfig,
 	effort: ReasoningEffort,
-	endpoint: string,
+	baseUrl: string,
 	template: string
 ): string {
 	const modelName = model.name || model.id;
@@ -439,7 +443,7 @@ function formatModelName(
 		modelName,
 		apiModel: model.apiModel || model.id,
 		reasoningEffort: effort,
-		endpointHost: endpoint ? hostnameOrEndpoint(endpoint) : ''
+		baseUrlHost: baseUrl ? hostnameOrUrl(baseUrl) : ''
 	};
 	const rendered = (template || '${modelName}').replace(/\$\{([A-Za-z][A-Za-z0-9]*)\}/g, (match, key) =>
 		values[key] ?? match
@@ -607,7 +611,7 @@ interface FetchOptions {
 	token: vscode.CancellationToken;
 }
 
-async function fetchWithRetry(endpoint: string, options: FetchOptions): Promise<Response> {
+async function fetchWithRetry(requestUrl: string, options: FetchOptions): Promise<Response> {
 	let lastError: unknown;
 
 	for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
@@ -616,7 +620,7 @@ async function fetchWithRetry(endpoint: string, options: FetchOptions): Promise<
 		}
 
 		try {
-			return await fetchOnce(endpoint, options);
+			return await fetchOnce(requestUrl, options);
 		} catch (error) {
 			lastError = error;
 			if (options.token.isCancellationRequested || attempt >= options.maxRetries) {
@@ -629,13 +633,13 @@ async function fetchWithRetry(endpoint: string, options: FetchOptions): Promise<
 	throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-async function fetchOnce(endpoint: string, options: FetchOptions): Promise<Response> {
+async function fetchOnce(requestUrl: string, options: FetchOptions): Promise<Response> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
 	const cancellation = options.token.onCancellationRequested(() => controller.abort());
 
 	try {
-		return await fetch(endpoint, {
+		return await fetch(requestUrl, {
 			method: options.method,
 			headers: options.headers,
 			body: options.body,
@@ -910,7 +914,7 @@ async function pickProfile(
 		profiles.map((profile) => ({
 			label: profile.name,
 			description: profile.id,
-			detail: profile.endpoint || 'No endpoint configured',
+			detail: profile.baseUrl || 'No baseUrl configured',
 			profile
 		})),
 		{ placeHolder }
@@ -946,7 +950,7 @@ function normalizeProfiles(
 		normalizedProfiles.push({
 			id,
 			name,
-			endpoint: trim(profile.endpoint),
+			baseUrl: trim(profile.baseUrl),
 			apiKey: trim(profile.apiKey),
 			requireApiKey: readBoolean(profile.requireApiKey, true),
 			apiKeyHeader: trim(profile.apiKeyHeader) || 'Authorization',
@@ -1009,7 +1013,7 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 				providerId,
 				apiModel: trim(model.apiModel) || upstreamId,
 				name: typeof model.name === 'string' && model.name.trim() ? model.name.trim() : upstreamId,
-				endpoint: trim(model.endpoint),
+				baseUrl: trim(model.baseUrl),
 				family: trim(model.family) || upstreamId,
 				version: trim(model.version) || '1',
 				maxInputTokens: normalizePositiveNumber(model.maxInputTokens, 128000),
@@ -1078,11 +1082,33 @@ function uniqueId(preferredId: string, seenIds: Set<string>): string {
 	return id;
 }
 
-function hostnameOrEndpoint(endpoint: string): string {
+function resolveResponsesRequestUrl(baseUrl: string): string {
+	const rawBaseUrl = trim(baseUrl);
+	if (!rawBaseUrl) {
+		return '';
+	}
+
 	try {
-		return new URL(endpoint).hostname;
+		const url = new URL(rawBaseUrl);
+		const hasSubPath = url.pathname.length > 0 && url.pathname !== '/';
+		if (hasSubPath) {
+			return rawBaseUrl;
+		}
+
+		url.pathname = '/v1/responses';
+		url.hash = '';
+		return url.toString();
 	} catch {
-		return endpoint;
+		return rawBaseUrl;
+	}
+}
+
+function hostnameOrUrl(urlValue: string): string {
+	try {
+		const url = new URL(urlValue);
+		return url.port ? `${url.hostname}:${url.port}` : url.hostname;
+	} catch {
+		return urlValue;
 	}
 }
 

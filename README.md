@@ -1,13 +1,13 @@
 # Copilot Custom Provider
 
-Adds a VS Code language model provider named `Custom OpenAI Responses` for OpenAI **Responses** API compatible endpoints.
+Adds a VS Code language model provider named `Custom OpenAI Responses` for OpenAI **Responses** API compatible services.
 
 This extension does not replace or proxy GitHub Copilot's built-in models. It adds separate custom models to the VS Code/Copilot model picker.
 
 ## Requirements
 
 - VS Code `1.106.0` or newer.
-- One or more endpoints compatible with the OpenAI Responses API, usually `/v1/responses`.
+- One or more services compatible with the OpenAI Responses API.
 
 ## Quick Setup
 
@@ -19,7 +19,7 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
     {
       "id": "host-a",
       "name": "Host A",
-      "endpoint": "https://host-a.example.com/v1/responses",
+      "baseUrl": "https://host-a.example.com",
       "models": [
         {
           "id": "gpt-5.5",
@@ -44,7 +44,7 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
     {
       "id": "host-b",
       "name": "Host B",
-      "endpoint": "https://host-b.example.com/v1/responses",
+      "baseUrl": "https://host-b.example.com",
       "models": [
         {
           "id": "gpt-5.5",
@@ -59,13 +59,18 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
 }
 ```
 
-Then run:
+Then run this command for each profile that requires a key:
 
 ```text
 Custom OpenAI Responses: Set API Key
 ```
 
-The command asks which profile to update. Custom models can appear in the Copilot/Chat model picker before a key is set, but a request will fail until the selected profile has a key or `requireApiKey` is `false`.
+This step is important. `settings.json` defines the profiles and models, but the key is normally stored separately in VS Code SecretStorage. The command asks which profile to update. Custom models can appear in the Copilot/Chat model picker before a key is set, but a request will fail until the selected profile has a key or `requireApiKey` is `false`.
+
+`baseUrl` can be either:
+
+- `https://host-a.example.com` or `https://host-a.example.com:8443`: the extension sends requests to `https://host-a.example.com/v1/responses` automatically.
+- `https://host-a.example.com/proxy/v1/responses`: the extension uses this URL exactly as configured. Use this form when a relay service has an extra path segment.
 
 By default, model names are shown as:
 
@@ -92,7 +97,7 @@ By default, requests use:
 Authorization: Bearer <key>
 ```
 
-Change `apiKeyHeader` or `apiKeyPrefix` only if your endpoint requires a different auth header.
+Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a different auth header.
 
 ## Field Reference
 
@@ -102,7 +107,7 @@ Profile fields:
 | --- | --- | --- | --- |
 | `id` | Yes | - | Stable profile id. Used for SecretStorage and default model ids. Must be unique. |
 | `name` | No | `id` | Display name shown in model details and key prompts. |
-| `endpoint` | Usually | - | Responses API URL for this profile. Can be omitted if every model has its own `endpoint`. |
+| `baseUrl` | Usually | - | Service base URL for this profile. If it has no path, `/v1/responses` is appended automatically. If it has a path, it is used exactly as configured. Can be omitted if every model has its own `baseUrl`. |
 | `apiKey` | No | - | Inline key fallback. Prefer the Set API Key command. |
 | `requireApiKey` | No | `true` | Require a key when using this profile. Models still appear before a key is set. Set `false` for local/proxy endpoints that need no key. |
 | `apiKeyHeader` | No | `Authorization` | Header name used for the key. |
@@ -117,14 +122,14 @@ Model fields:
 | --- | --- | --- | --- |
 | `id` | Yes | - | Upstream model id sent as `model` when `apiModel` is not set. May repeat across profiles. |
 | `providerId` | No | `<profile id>/<model id>` | Unique VS Code/Copilot model id. Set this when one profile exposes the same `id` more than once. |
-| `apiModel` | No | `id` | Actual model value sent to the endpoint. |
+| `apiModel` | No | `id` | Actual model value sent to the Responses API request. |
 | `name` | No | `id` | Base display name. Used as `${modelName}` in `modelNameTemplate`. |
-| `endpoint` | No | profile `endpoint` | Per-model endpoint override. Uses the same profile key and headers. |
+| `baseUrl` | No | profile `baseUrl` | Per-model base URL or full Responses API URL override. Uses the same profile key and headers. |
 | `family` | No | `id` | Model family advertised to VS Code. |
 | `version` | No | `1` | Model version advertised to VS Code. |
 | `maxInputTokens` | No | `128000` | Input token budget advertised to VS Code. |
 | `maxOutputTokens` | No | `16384` | Output token budget advertised and sent as `max_output_tokens`. |
-| `toolCalling` | No | `false` | Advertise tool support and forward VS Code tools to the endpoint. |
+| `toolCalling` | No | `false` | Advertise tool support and forward VS Code tools to the Responses API request. |
 | `vision` | No | `false` | Advertise image input support. Image data is sent as Responses API `input_image`. |
 | `reasoningEffort` | No | global default | Sent as `reasoning.effort`. Values: `minimal`, `low`, `medium`, `high`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
@@ -146,7 +151,7 @@ Global fields:
 | `copilotCustomProvider.logRequests` | `false` | Log request metadata. Bodies and keys are not logged. |
 | `copilotCustomProvider.requestBodyOverrides` | `{}` | JSON fields merged into every request. |
 
-`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${endpointHost}`. Copilot reliably shows the model name and tooltip; the tooltip is kept to a single line and only shows API key status when a required key is missing.
+`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${baseUrlHost}`. Copilot reliably shows the model name and tooltip; the tooltip is kept to a single line and only shows API key status when a required key is missing.
 
 Request body merge order:
 
@@ -166,7 +171,7 @@ For example, two profiles can both use:
 { "id": "gpt-5.5" }
 ```
 
-They appear to VS Code as `host-a/gpt-5.5` and `host-b/gpt-5.5`, while each endpoint receives:
+They appear to VS Code as `host-a/gpt-5.5` and `host-b/gpt-5.5`, while each service receives:
 
 ```json
 { "model": "gpt-5.5" }

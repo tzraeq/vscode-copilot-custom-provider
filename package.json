@@ -65,7 +65,7 @@
                 {
                   "id": "${1:host-a}",
                   "name": "${2:Host A}",
-                  "endpoint": "${3:https://host-a.example.com/v1/responses}",
+                  "baseUrl": "${3:https://host-a.example.com}",
                   "models": [
                     {
                       "id": "${4:gpt-5.5}",
@@ -82,7 +82,7 @@
                 {
                   "id": "${6:host-b}",
                   "name": "${7:Host B}",
-                  "endpoint": "${8:https://host-b.example.com/v1/responses}",
+                  "baseUrl": "${8:https://host-b.example.com}",
                   "models": [
                     {
                       "id": "${9:gpt-5.5}",
@@ -100,7 +100,7 @@
             }
           ],
           "scope": "machine-overridable",
-          "markdownDescription": "Endpoint/key groups exposed under this provider. Each profile has its own endpoint, API key stored under the profile id in VS Code SecretStorage, headers, request body overrides, and model list.",
+          "markdownDescription": "Base URL/key groups exposed under this provider. Each profile has its own `baseUrl`, API key stored under the profile id in VS Code SecretStorage, headers, request body overrides, and model list. After configuring profiles, run `Custom OpenAI Responses: Set API Key` for each profile that requires a key.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -116,9 +116,9 @@
                 "type": "string",
                 "description": "Human-readable profile name shown in model details and API key commands."
               },
-              "endpoint": {
+              "baseUrl": {
                 "type": "string",
-                "markdownDescription": "OpenAI Responses API compatible endpoint URL for this profile, for example `https://gateway-a.example.com/v1/responses`."
+                "markdownDescription": "Base URL for this profile, for example `https://host-a.example.com` or `https://host-a.example.com:8443`. If the URL has no path, requests are sent to `/v1/responses` automatically. If you include a path, for example `https://host-a.example.com/proxy/v1/responses`, it is used exactly as configured."
               },
               "apiKey": {
                 "type": "string",
@@ -196,9 +196,9 @@
                       "type": "string",
                       "markdownDescription": "Base display name for this model. The final picker name is produced by `copilotCustomProvider.modelNameTemplate`, where this value is `${modelName}`."
                     },
-                    "endpoint": {
+                    "baseUrl": {
                       "type": "string",
-                      "description": "Optional endpoint URL override for this model."
+                      "markdownDescription": "Optional base URL or full Responses API URL override for this model. It uses the same automatic `/v1/responses` rule as the profile `baseUrl`."
                     },
                     "family": {
                       "type": "string",
@@ -245,13 +245,13 @@
                       "type": "number",
                       "minimum": 0,
                       "maximum": 2,
-                      "description": "Optional temperature sent to the endpoint."
+                      "description": "Optional temperature sent to the Responses API request."
                     },
                     "topP": {
                       "type": "number",
                       "minimum": 0,
                       "maximum": 1,
-                      "description": "Optional top_p sent to the endpoint."
+                      "description": "Optional top_p sent to the Responses API request."
                     },
                     "extraBody": {
                       "type": "object",
@@ -303,7 +303,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine-overridable",
-          "description": "Request streaming responses from the endpoint."
+          "description": "Request streaming responses from the target Responses API URL."
         },
         "copilotCustomProvider.maxRetries": {
           "type": "number",
@@ -324,7 +324,7 @@
           "type": "string",
           "default": "${profileName}/${modelName}",
           "scope": "resource",
-          "markdownDescription": "Template for model names shown in the Copilot/Chat model picker. Useful because all models share the `Custom OpenAI Responses` provider group. Supported placeholders: `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, `${endpointHost}`."
+          "markdownDescription": "Template for model names shown in the Copilot/Chat model picker. Useful because all models share the `Custom OpenAI Responses` provider group. Supported placeholders: `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, `${baseUrlHost}`."
         },
         "copilotCustomProvider.logRequests": {
           "type": "boolean",
