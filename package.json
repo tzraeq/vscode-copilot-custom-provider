@@ -31,7 +31,7 @@
     "commands": [
       {
         "command": "copilotCustomProvider.manage",
-        "title": "Manage Custom OpenAI Responses Provider"
+        "title": "Custom OpenAI Responses: Manage Provider"
       },
       {
         "command": "copilotCustomProvider.setApiKey",
