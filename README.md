@@ -146,7 +146,7 @@ Global fields:
 | `copilotCustomProvider.logRequests` | `false` | Log request metadata. Bodies and keys are not logged. |
 | `copilotCustomProvider.requestBodyOverrides` | `{}` | JSON fields merged into every request. |
 
-`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${endpointHost}`. Copilot reliably shows the model name and tooltip; the tooltip includes profile, VS Code id, upstream model, reasoning effort, endpoint host, and key state in a single line.
+`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${endpointHost}`. Copilot reliably shows the model name and tooltip; the tooltip is kept to a single line and only shows API key status when a required key is missing.
 
 Request body merge order:
 

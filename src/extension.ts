@@ -387,19 +387,20 @@ function toLanguageModelInformation(
 ): CustomLanguageModel {
 	const effort = normalizeReasoningEffort(model.reasoningEffort, config.defaultReasoningEffort);
 	const endpoint = model.endpoint || profile.endpoint;
-	const rawModelName = model.name || model.id;
 	const displayModelName = formatModelName(profile, model, effort, endpoint, config.modelNameTemplate);
-	const apiKeyState = profile.requireApiKey ? (profile.apiKey ? 'set' : 'not set') : 'not required';
 
 	const preferredProviderModelId = model.providerId || buildProviderModelId(profile.id, model.id);
 	const providerModelId = seenProviderModelIds
 		? uniqueId(preferredProviderModelId, seenProviderModelIds)
 		: preferredProviderModelId;
-	const tooltip = formatModelTooltip([
+	const tooltipLines = [
 		`Reasoning effort: ${effort}`,
-		`Endpoint: ${endpoint ? hostnameOrEndpoint(endpoint) : 'not set'}`,
-		`API key: ${apiKeyState}`
-	]);
+		`Endpoint: ${endpoint ? hostnameOrEndpoint(endpoint) : 'not set'}`
+	];
+	if (profile.requireApiKey && !profile.apiKey) {
+		tooltipLines.push('API key: not set');
+	}
+	const tooltip = formatModelTooltip(tooltipLines);
 
 	return {
 		id: providerModelId,
