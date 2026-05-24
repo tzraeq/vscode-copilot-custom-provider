@@ -26,7 +26,10 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "name": "GPT-5.5 Medium",
           "toolCalling": true,
           "vision": true,
-          "reasoningEffort": "medium"
+          "reasoningEffort": "medium",
+          "patch": {
+            "dropTruncation": true
+          }
         },
         {
           "id": "gpt-5.5",
@@ -119,6 +122,7 @@ Model fields:
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
+| `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
 
 Global fields:
 
@@ -138,6 +142,8 @@ Request body merge order:
 ```text
 provider defaults -> global requestBodyOverrides -> profile requestBodyOverrides -> model extraBody -> modelOptions
 ```
+
+`patch.dropTruncation` is a compatibility switch. Some third-party relay APIs do not correctly process Copilot's `truncation: "disabled"` field in Responses API requests. If debugging shows that this field causes the relay to reject or mishandle requests, set `patch.dropTruncation` to `true` for that model.
 
 ## Model IDs
 
@@ -162,3 +168,7 @@ If one profile exposes the same upstream model multiple times, set different `pr
 Third-party VS Code language model providers do not get Copilot's native Thinking Effort switch. Configure `reasoningEffort` per model instead.
 
 To give users a picker-level choice, expose multiple entries with the same upstream `id` and different `providerId` values, such as `gpt-5-low`, `gpt-5-medium`, and `gpt-5-high`.
+
+## HTTP Forwarding
+
+Requests are sent with the VS Code extension runtime's built-in `fetch`, with `AbortController` for timeout and cancellation. No third-party HTTP client is used.

@@ -6,6 +6,10 @@ const secretPrefix = 'copilotCustomProvider.apiKey.';
 
 type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
+interface ModelPatchConfig {
+	dropTruncation: boolean;
+}
+
 interface ModelConfig {
 	id: string;
 	providerId?: string;
@@ -22,6 +26,7 @@ interface ModelConfig {
 	temperature?: number;
 	topP?: number;
 	extraBody?: Record<string, unknown>;
+	patch?: ModelPatchConfig;
 }
 
 interface ProviderProfileConfig {
@@ -479,13 +484,15 @@ function buildResponsesRequestBody(
 		}
 	}
 
-	return mergeObjects(
+	const bodyWithOverrides = mergeObjects(
 		body,
 		config.requestBodyOverrides,
 		profile.requestBodyOverrides,
 		normalizeObject(modelConfig.extraBody),
 		sanitizeModelOptions(modelOptions)
 	) as ResponsesRequestBody;
+
+	return applyModelPatch(bodyWithOverrides, modelConfig.patch);
 }
 
 function toResponsesInputMessage(message: vscode.LanguageModelChatRequestMessage): ResponsesInputMessage {
@@ -966,7 +973,10 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 			maxOutputTokens: 16384,
 			toolCalling: true,
 			vision: true,
-			reasoningEffort: 'medium'
+			reasoningEffort: 'medium',
+			patch: {
+				dropTruncation: false
+			}
 		}];
 	}
 
@@ -994,9 +1004,17 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 				toolCalling: model.toolCalling ?? false,
 				vision: Boolean(model.vision),
 				reasoningEffort: normalizeReasoningEffort(model.reasoningEffort, 'medium'),
-				extraBody: normalizeObject(model.extraBody)
+				extraBody: normalizeObject(model.extraBody),
+				patch: normalizeModelPatch(model.patch)
 			};
 		});
+}
+
+function normalizeModelPatch(value: unknown): ModelPatchConfig {
+	const patch = isRecord(value) ? value : {};
+	return {
+		dropTruncation: readBoolean(patch.dropTruncation, false)
+	};
 }
 
 function normalizeStringRecord(value: Record<string, unknown> | undefined): Record<string, string> {
@@ -1065,6 +1083,13 @@ function sanitizeModelOptions(modelOptions: Record<string, unknown>): Record<str
 	delete sanitized.maxOutputTokens;
 	delete sanitized.topP;
 	return sanitized;
+}
+
+function applyModelPatch(body: ResponsesRequestBody, patch: ModelPatchConfig | undefined): ResponsesRequestBody {
+	if (patch?.dropTruncation) {
+		delete body.truncation;
+	}
+	return body;
 }
 
 function readNestedString(object: Record<string, unknown>, path: string[]): string | undefined {

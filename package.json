@@ -49,10 +49,52 @@
         "copilotCustomProvider.profiles": {
           "type": "array",
           "default": [],
+          "defaultSnippets": [
+            {
+              "label": "Two Responses API profiles",
+              "body": [
+                {
+                  "id": "${1:host-a}",
+                  "name": "${2:Host A}",
+                  "endpoint": "${3:https://host-a.example.com/v1/responses}",
+                  "models": [
+                    {
+                      "id": "${4:gpt-5.5}",
+                      "name": "${5:GPT-5.5}",
+                      "toolCalling": true,
+                      "vision": true,
+                      "reasoningEffort": "medium",
+                      "patch": {
+                        "dropTruncation": false
+                      }
+                    }
+                  ]
+                },
+                {
+                  "id": "${6:host-b}",
+                  "name": "${7:Host B}",
+                  "endpoint": "${8:https://host-b.example.com/v1/responses}",
+                  "models": [
+                    {
+                      "id": "${9:gpt-5.5}",
+                      "name": "${10:GPT-5.5}",
+                      "toolCalling": true,
+                      "vision": true,
+                      "reasoningEffort": "medium",
+                      "patch": {
+                        "dropTruncation": false
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
           "scope": "machine-overridable",
           "markdownDescription": "Endpoint/key groups exposed under this provider. Each profile has its own endpoint, API key stored under the profile id in VS Code SecretStorage, headers, request body overrides, and model list.",
           "items": {
             "type": "object",
+            "additionalProperties": false,
             "required": [
               "id"
             ],
@@ -91,11 +133,19 @@
               "extraHeaders": {
                 "type": "object",
                 "default": {},
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean"
+                  ]
+                },
                 "description": "Additional HTTP headers sent for this profile. Values are sent as strings."
               },
               "requestBodyOverrides": {
                 "type": "object",
                 "default": {},
+                "additionalProperties": true,
                 "description": "Additional JSON body fields merged into every request for this profile."
               },
               "models": {
@@ -116,6 +166,7 @@
                 "markdownDescription": "Models exposed for this profile. `id` and `apiModel` are upstream model identifiers and can repeat across profiles. The VS Code/Copilot id defaults to `profileId/modelId`.",
                 "items": {
                   "type": "object",
+                  "additionalProperties": false,
                   "required": [
                     "id"
                   ],
@@ -176,7 +227,8 @@
                         "minimal",
                         "low",
                         "medium",
-                        "high"
+                        "high",
+                        "xhigh"
                       ],
                       "description": "Reasoning effort injected into Responses API requests for this model."
                     },
@@ -194,7 +246,23 @@
                     },
                     "extraBody": {
                       "type": "object",
+                      "additionalProperties": true,
                       "description": "Additional JSON body fields merged into requests for one model."
+                    },
+                    "patch": {
+                      "type": "object",
+                      "default": {
+                        "dropTruncation": false
+                      },
+                      "additionalProperties": false,
+                      "markdownDescription": "Small compatibility patches applied after all request body fields are merged. Defaults are conservative and do not change request semantics unless explicitly enabled.",
+                      "properties": {
+                        "dropTruncation": {
+                          "type": "boolean",
+                          "default": false,
+                          "markdownDescription": "Delete the top-level `truncation` field from the outgoing Responses API request. Some third-party relay APIs cannot correctly handle Copilot's `truncation: \"disabled\"` field; enable this only when debugging shows removing that field fixes the relay. Default `false` preserves normal request semantics."
+                        }
+                      }
                     }
                   }
                 }
@@ -209,7 +277,8 @@
             "minimal",
             "low",
             "medium",
-            "high"
+            "high",
+            "xhigh"
           ],
           "scope": "resource",
           "description": "Reasoning effort used when a model does not define its own reasoningEffort."

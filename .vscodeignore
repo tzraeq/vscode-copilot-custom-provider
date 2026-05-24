@@ -1,6 +1,7 @@
 src/**
 node_modules/**
 .vscode/**
+.history/**
 *.vsix
 tsconfig.json
 package-lock.json
