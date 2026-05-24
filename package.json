@@ -1,0 +1,275 @@
+{
+  "name": "vscode-copilot-custom-provider",
+  "displayName": "Copilot Custom Provider",
+  "description": "A configurable VS Code language model provider backed by an OpenAI Responses API compatible endpoint.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "AI"
+  ],
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "custom-openai-responses",
+        "displayName": "Custom OpenAI Responses",
+        "managementCommand": "copilotCustomProvider.manage"
+      }
+    ],
+    "commands": [
+      {
+        "command": "copilotCustomProvider.manage",
+        "title": "Manage Custom OpenAI Responses Provider"
+      },
+      {
+        "command": "copilotCustomProvider.setApiKey",
+        "title": "Custom OpenAI Responses: Set API Key"
+      },
+      {
+        "command": "copilotCustomProvider.clearApiKey",
+        "title": "Custom OpenAI Responses: Clear API Key"
+      },
+      {
+        "command": "copilotCustomProvider.openSettings",
+        "title": "Custom OpenAI Responses: Open Settings"
+      }
+    ],
+    "configuration": {
+      "title": "Copilot Custom Provider",
+      "properties": {
+        "copilotCustomProvider.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine-overridable",
+          "description": "Enable the custom language model provider."
+        },
+        "copilotCustomProvider.profiles": {
+          "type": "array",
+          "default": [],
+          "scope": "machine-overridable",
+          "markdownDescription": "Endpoint/key groups exposed under this provider. Each profile has its own endpoint, API key stored under the profile id in VS Code SecretStorage, headers, request body overrides, and model list.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "markdownDescription": "Stable profile id. Used to build the default VS Code model id as `profileId/modelId`."
+              },
+              "name": {
+                "type": "string",
+                "description": "Human-readable profile name shown in model details and API key commands."
+              },
+              "endpoint": {
+                "type": "string",
+                "markdownDescription": "OpenAI Responses API compatible endpoint URL for this profile, for example `https://gateway-a.example.com/v1/responses`."
+              },
+              "apiKey": {
+                "type": "string",
+                "description": "API key for this profile. Prefer the Set API Key command, which stores the key in VS Code SecretStorage."
+              },
+              "requireApiKey": {
+                "type": "boolean",
+                "default": true,
+                "description": "Require an API key before exposing this profile's models."
+              },
+              "apiKeyHeader": {
+                "type": "string",
+                "default": "Authorization",
+                "description": "Header name used for this profile's API key."
+              },
+              "apiKeyPrefix": {
+                "type": "string",
+                "default": "Bearer ",
+                "markdownDescription": "Prefix prepended to this profile's API key header value. Use `Bearer ` for OpenAI-compatible services, or an empty string for raw key headers."
+              },
+              "extraHeaders": {
+                "type": "object",
+                "default": {},
+                "description": "Additional HTTP headers sent for this profile. Values are sent as strings."
+              },
+              "requestBodyOverrides": {
+                "type": "object",
+                "default": {},
+                "description": "Additional JSON body fields merged into every request for this profile."
+              },
+              "models": {
+                "type": "array",
+                "default": [
+                  {
+                    "id": "gpt-5",
+                    "name": "GPT-5 Custom",
+                    "family": "gpt-5",
+                    "version": "1",
+                    "maxInputTokens": 128000,
+                    "maxOutputTokens": 16384,
+                    "toolCalling": true,
+                    "vision": true,
+                    "reasoningEffort": "medium"
+                  }
+                ],
+                "markdownDescription": "Models exposed for this profile. `id` and `apiModel` are upstream model identifiers and can repeat across profiles. The VS Code/Copilot id defaults to `profileId/modelId`.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "Upstream model id. Sent to the Responses API when apiModel is omitted."
+                    },
+                    "providerId": {
+                      "type": "string",
+                      "markdownDescription": "Optional unique id exposed to VS Code/Copilot. Defaults to `profileId/modelId`. Use this only when you need a custom stable picker id."
+                    },
+                    "apiModel": {
+                      "type": "string",
+                      "description": "Model id sent to the Responses API. Defaults to id."
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Display name shown in the model picker."
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "description": "Optional endpoint URL override for this model."
+                    },
+                    "family": {
+                      "type": "string",
+                      "description": "Model family identifier exposed to VS Code."
+                    },
+                    "version": {
+                      "type": "string",
+                      "description": "Model version exposed to VS Code."
+                    },
+                    "maxInputTokens": {
+                      "type": "number",
+                      "minimum": 1,
+                      "description": "Maximum input token budget advertised to VS Code."
+                    },
+                    "maxOutputTokens": {
+                      "type": "number",
+                      "minimum": 1,
+                      "description": "Maximum output token budget advertised to VS Code and sent as max_output_tokens."
+                    },
+                    "toolCalling": {
+                      "type": [
+                        "boolean",
+                        "number"
+                      ],
+                      "minimum": 1,
+                      "description": "Advertise tool calling support and forward VS Code tools to the Responses API. A number advertises the maximum number of tools accepted."
+                    },
+                    "vision": {
+                      "type": "boolean",
+                      "description": "Advertise image input support."
+                    },
+                    "reasoningEffort": {
+                      "type": "string",
+                      "enum": [
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high"
+                      ],
+                      "description": "Reasoning effort injected into Responses API requests for this model."
+                    },
+                    "temperature": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 2,
+                      "description": "Optional temperature sent to the endpoint."
+                    },
+                    "topP": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1,
+                      "description": "Optional top_p sent to the endpoint."
+                    },
+                    "extraBody": {
+                      "type": "object",
+                      "description": "Additional JSON body fields merged into requests for one model."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "copilotCustomProvider.defaultReasoningEffort": {
+          "type": "string",
+          "default": "medium",
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "scope": "resource",
+          "description": "Reasoning effort used when a model does not define its own reasoningEffort."
+        },
+        "copilotCustomProvider.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "scope": "machine-overridable",
+          "description": "HTTP request timeout in milliseconds."
+        },
+        "copilotCustomProvider.enableStreaming": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine-overridable",
+          "description": "Request streaming responses from the endpoint."
+        },
+        "copilotCustomProvider.maxRetries": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 5,
+          "scope": "machine-overridable",
+          "description": "Number of retries for failed non-cancelled HTTP requests."
+        },
+        "copilotCustomProvider.tokenEstimateCharsPerToken": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "scope": "resource",
+          "description": "Approximate characters per token used by provideTokenCount."
+        },
+        "copilotCustomProvider.logRequests": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "description": "Write request metadata to the extension output channel. Request bodies and API keys are never logged."
+        },
+        "copilotCustomProvider.requestBodyOverrides": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "description": "Additional JSON body fields merged into every Responses API request."
+        }
+      }
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/vscode": "^1.106.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^6.0.3"
+  }
+}

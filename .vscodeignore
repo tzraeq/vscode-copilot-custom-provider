@@ -1,0 +1,7 @@
+src/**
+node_modules/**
+.vscode/**
+*.vsix
+tsconfig.json
+package-lock.json
+.gitignore
