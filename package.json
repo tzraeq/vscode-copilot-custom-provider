@@ -2,9 +2,18 @@
   "name": "vscode-copilot-custom-provider",
   "displayName": "Copilot Custom Provider",
   "description": "A configurable VS Code language model provider backed by an OpenAI Responses API compatible endpoint.",
-  "version": "0.0.1",
-  "publisher": "local",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tzraeq/vscode-copilot-custom-provider.git"
+  },
+  "version": "0.6.0",
+  "publisher": "tzraeq",
   "license": "MIT",
+  "homepage": "https://github.com/tzraeq/vscode-copilot-custom-provider",
+  "bugs": {
+      "url": "https://github.com/tzraeq/vscode-copilot-custom-provider/issues"
+  },
   "engines": {
     "vscode": "^1.106.0"
   },
