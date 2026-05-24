@@ -4,7 +4,7 @@ const vendor = 'custom-openai-responses';
 const configSection = 'copilotCustomProvider';
 const secretPrefix = 'copilotCustomProvider.apiKey.';
 
-type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 interface ModelPatchConfig {
 	dropTruncation: boolean;
@@ -50,6 +50,7 @@ interface ExtensionConfig {
 	enableStreaming: boolean;
 	maxRetries: number;
 	tokenEstimateCharsPerToken: number;
+	modelNameTemplate: string;
 	logRequests: boolean;
 	requestBodyOverrides: Record<string, unknown>;
 }
@@ -62,6 +63,7 @@ interface SelectedModelConfig {
 }
 
 interface CustomLanguageModel extends vscode.LanguageModelChatInformation {
+	readonly isUserSelectable?: boolean;
 	readonly config: SelectedModelConfig;
 }
 
@@ -186,39 +188,16 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			return [];
 		}
 
-		const missingKeyProfiles = usableProfiles.filter((profile) => profile.requireApiKey && !profile.apiKey);
-		const availableProfiles = usableProfiles.filter((profile) => !profile.requireApiKey || profile.apiKey);
-		if (availableProfiles.length === 0) {
-			if (!options.silent) {
-				const choice = await vscode.window.showWarningMessage(
-					'Custom OpenAI Responses provider is missing an API key.',
-					'Set API Key',
-					'Open Settings'
-				);
-				if (choice === 'Set API Key') {
-					await setApiKey(this.context, this);
-				} else if (choice === 'Open Settings') {
-					await openSettings();
-				}
-			}
-			return [];
-		}
-
 		if (!options.silent) {
 			if (missingEndpointProfiles.length > 0) {
 				this.output.appendLine(
 					`Skipped profiles without endpoint: ${missingEndpointProfiles.map((profile) => profile.id).join(', ')}`
 				);
 			}
-			if (missingKeyProfiles.length > 0) {
-				this.output.appendLine(
-					`Skipped profiles without API key: ${missingKeyProfiles.map((profile) => profile.id).join(', ')}`
-				);
-			}
 		}
 
 		const seenProviderModelIds = new Set<string>();
-		return availableProfiles.flatMap((profile) =>
+		return usableProfiles.flatMap((profile) =>
 			profile.models
 				.filter((model) => typeof model.id === 'string' && model.id.trim().length > 0)
 				.map((model) => toLanguageModelInformation(profile, model, config, seenProviderModelIds))
@@ -382,6 +361,7 @@ async function readConfig(context: vscode.ExtensionContext): Promise<ExtensionCo
 		enableStreaming: config.get<boolean>('enableStreaming', true),
 		maxRetries: Math.max(0, Math.min(5, config.get<number>('maxRetries', 1))),
 		tokenEstimateCharsPerToken: Math.max(1, config.get<number>('tokenEstimateCharsPerToken', 4)),
+		modelNameTemplate: config.get<string>('modelNameTemplate', '${profileName}/${modelName}'),
 		logRequests: config.get<boolean>('logRequests', false),
 		requestBodyOverrides
 	};
@@ -406,26 +386,30 @@ function toLanguageModelInformation(
 	seenProviderModelIds?: Set<string>
 ): CustomLanguageModel {
 	const effort = normalizeReasoningEffort(model.reasoningEffort, config.defaultReasoningEffort);
-	const detailParts = [profile.name, `reasoning: ${effort}`];
 	const endpoint = model.endpoint || profile.endpoint;
-	if (endpoint) {
-		detailParts.push(hostnameOrEndpoint(endpoint));
-	}
+	const rawModelName = model.name || model.id;
+	const displayModelName = formatModelName(profile, model, effort, endpoint, config.modelNameTemplate);
+	const apiKeyState = profile.requireApiKey ? (profile.apiKey ? 'set' : 'not set') : 'not required';
 
 	const preferredProviderModelId = model.providerId || buildProviderModelId(profile.id, model.id);
 	const providerModelId = seenProviderModelIds
 		? uniqueId(preferredProviderModelId, seenProviderModelIds)
 		: preferredProviderModelId;
+	const tooltip = formatModelTooltip([
+		`Reasoning effort: ${effort}`,
+		`Endpoint: ${endpoint ? hostnameOrEndpoint(endpoint) : 'not set'}`,
+		`API key: ${apiKeyState}`
+	]);
 
 	return {
 		id: providerModelId,
-		name: model.name || model.id,
+		name: displayModelName,
 		family: model.family || model.id,
 		version: model.version || '1',
+		isUserSelectable: true,
 		maxInputTokens: normalizePositiveNumber(model.maxInputTokens, 128000),
 		maxOutputTokens: normalizePositiveNumber(model.maxOutputTokens, 16384),
-		detail: detailParts.join(' | '),
-		tooltip: `${model.name || model.id}\nProfile: ${profile.name} (${profile.id})\nVS Code id: ${providerModelId}\nUpstream model: ${model.apiModel || model.id}\nReasoning effort: ${effort}`,
+		tooltip,
 		capabilities: {
 			imageInput: Boolean(model.vision),
 			toolCalling: model.toolCalling ?? false
@@ -437,6 +421,34 @@ function toLanguageModelInformation(
 			model
 		}
 	};
+}
+
+function formatModelName(
+	profile: ProviderProfileConfig,
+	model: ModelConfig,
+	effort: ReasoningEffort,
+	endpoint: string,
+	template: string
+): string {
+	const modelName = model.name || model.id;
+	const values: Record<string, string> = {
+		profileId: profile.id,
+		profileName: profile.name,
+		modelId: model.id,
+		modelName,
+		apiModel: model.apiModel || model.id,
+		reasoningEffort: effort,
+		endpointHost: endpoint ? hostnameOrEndpoint(endpoint) : ''
+	};
+	const rendered = (template || '${modelName}').replace(/\$\{([A-Za-z][A-Za-z0-9]*)\}/g, (match, key) =>
+		values[key] ?? match
+	).trim();
+
+	return rendered || modelName;
+}
+
+function formatModelTooltip(lines: string[]): string {
+	return lines.join(' | ');
 }
 
 function buildResponsesRequestBody(
@@ -1036,7 +1048,7 @@ function normalizeObject(value: unknown): Record<string, unknown> {
 }
 
 function normalizeReasoningEffort(value: unknown, fallback: ReasoningEffort): ReasoningEffort {
-	return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high'
+	return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
 		? value
 		: fallback;
 }

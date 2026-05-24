@@ -65,7 +65,15 @@ Then run:
 Custom OpenAI Responses: Set API Key
 ```
 
-The command asks which profile to update. After that, select the custom model from the Copilot/Chat model picker.
+The command asks which profile to update. Custom models can appear in the Copilot/Chat model picker before a key is set, but a request will fail until the selected profile has a key or `requireApiKey` is `false`.
+
+By default, model names are shown as:
+
+```text
+Host A/GPT-5.5
+```
+
+This keeps models from different profiles distinguishable inside the single `Custom OpenAI Responses` provider group.
 
 ## API Keys
 
@@ -96,7 +104,7 @@ Profile fields:
 | `name` | No | `id` | Display name shown in model details and key prompts. |
 | `endpoint` | Usually | - | Responses API URL for this profile. Can be omitted if every model has its own `endpoint`. |
 | `apiKey` | No | - | Inline key fallback. Prefer the Set API Key command. |
-| `requireApiKey` | No | `true` | Set `false` for local/proxy endpoints that need no key. |
+| `requireApiKey` | No | `true` | Require a key when using this profile. Models still appear before a key is set. Set `false` for local/proxy endpoints that need no key. |
 | `apiKeyHeader` | No | `Authorization` | Header name used for the key. |
 | `apiKeyPrefix` | No | `Bearer ` | Prefix before the key. Use `""` for raw key headers. |
 | `extraHeaders` | No | `{}` | Extra static headers for this profile. Do not put secrets here. |
@@ -110,7 +118,7 @@ Model fields:
 | `id` | Yes | - | Upstream model id sent as `model` when `apiModel` is not set. May repeat across profiles. |
 | `providerId` | No | `<profile id>/<model id>` | Unique VS Code/Copilot model id. Set this when one profile exposes the same `id` more than once. |
 | `apiModel` | No | `id` | Actual model value sent to the endpoint. |
-| `name` | No | `id` | Display name in the model picker. |
+| `name` | No | `id` | Base display name. Used as `${modelName}` in `modelNameTemplate`. |
 | `endpoint` | No | profile `endpoint` | Per-model endpoint override. Uses the same profile key and headers. |
 | `family` | No | `id` | Model family advertised to VS Code. |
 | `version` | No | `1` | Model version advertised to VS Code. |
@@ -134,8 +142,11 @@ Global fields:
 | `copilotCustomProvider.enableStreaming` | `true` | Request streaming responses. |
 | `copilotCustomProvider.maxRetries` | `1` | Retry count for failed non-cancelled HTTP requests. |
 | `copilotCustomProvider.tokenEstimateCharsPerToken` | `4` | Fallback token estimate used by VS Code. |
+| `copilotCustomProvider.modelNameTemplate` | `${profileName}/${modelName}` | Template for model names shown in the picker. |
 | `copilotCustomProvider.logRequests` | `false` | Log request metadata. Bodies and keys are not logged. |
 | `copilotCustomProvider.requestBodyOverrides` | `{}` | JSON fields merged into every request. |
+
+`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${endpointHost}`. Copilot reliably shows the model name and tooltip; the tooltip includes profile, VS Code id, upstream model, reasoning effort, endpoint host, and key state in a single line.
 
 Request body merge order:
 

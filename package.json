@@ -127,7 +127,7 @@
               "requireApiKey": {
                 "type": "boolean",
                 "default": true,
-                "description": "Require an API key before exposing this profile's models."
+                "description": "Require an API key when this profile is used. Models still appear in the picker so users can configure the key later."
               },
               "apiKeyHeader": {
                 "type": "string",
@@ -194,7 +194,7 @@
                     },
                     "name": {
                       "type": "string",
-                      "description": "Display name shown in the model picker."
+                      "markdownDescription": "Base display name for this model. The final picker name is produced by `copilotCustomProvider.modelNameTemplate`, where this value is `${modelName}`."
                     },
                     "endpoint": {
                       "type": "string",
@@ -320,6 +320,12 @@
           "scope": "resource",
           "description": "Approximate characters per token used by provideTokenCount."
         },
+        "copilotCustomProvider.modelNameTemplate": {
+          "type": "string",
+          "default": "${profileName}/${modelName}",
+          "scope": "resource",
+          "markdownDescription": "Template for model names shown in the Copilot/Chat model picker. Useful because all models share the `Custom OpenAI Responses` provider group. Supported placeholders: `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, `${endpointHost}`."
+        },
         "copilotCustomProvider.logRequests": {
           "type": "boolean",
           "default": false,
@@ -340,9 +346,10 @@
   ],
   "main": "./dist/extension.js",
   "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --no-dependencies"
+    "package": "npm run clean && npm run compile && vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
