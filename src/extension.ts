@@ -3,8 +3,19 @@ import * as vscode from 'vscode';
 const vendor = 'custom-openai-responses';
 const configSection = 'copilotCustomProvider';
 const secretPrefix = 'copilotCustomProvider.apiKey.';
+const statefulMarkerMimeType = 'stateful_marker';
+const responsesEndpoint = '/responses';
+const webSocketResponsesEndpoint = 'ws:/responses';
 
 type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+type LogLevel = 'off' | 'info' | 'debug';
+type ModelSupportedEndpoint = typeof responsesEndpoint | typeof webSocketResponsesEndpoint;
+
+type LanguageModelThinkingPartLike = {
+	readonly value?: string | string[];
+	readonly id?: string;
+	readonly metadata?: Record<string, unknown>;
+};
 
 interface ModelPatchConfig {
 	dropTruncation: boolean;
@@ -25,6 +36,8 @@ interface ModelConfig {
 	reasoningEffort?: ReasoningEffort;
 	temperature?: number;
 	topP?: number;
+	zeroDataRetentionEnabled?: boolean;
+	supportedEndpoints?: ModelSupportedEndpoint[];
 	extraBody?: Record<string, unknown>;
 	patch?: ModelPatchConfig;
 }
@@ -51,7 +64,7 @@ interface ExtensionConfig {
 	maxRetries: number;
 	tokenEstimateCharsPerToken: number;
 	modelNameTemplate: string;
-	logRequests: boolean;
+	logLevel: LogLevel;
 	requestBodyOverrides: Record<string, unknown>;
 }
 
@@ -69,36 +82,86 @@ interface CustomLanguageModel extends vscode.LanguageModelChatInformation {
 
 interface ResponsesRequestBody {
 	model: string;
-	input: ResponsesInputMessage[];
+	input: ResponsesInputItem[];
+	previous_response_id?: string;
 	stream?: boolean;
 	max_output_tokens?: number;
+	store?: boolean;
+	truncation?: 'auto' | 'disabled';
+	include?: string[];
+	top_logprobs?: number;
 	reasoning?: {
 		effort: ReasoningEffort;
 	};
 	temperature?: number;
 	top_p?: number;
 	tools?: ResponsesTool[];
-	tool_choice?: 'auto' | 'required';
+	tool_choice?: 'auto' | 'required' | { type: 'function'; name: string };
 	[key: string]: unknown;
 }
 
+type ResponsesInputItem =
+	| ResponsesInputMessage
+	| ResponsesOutputMessage
+	| ResponsesFunctionCall
+	| ResponsesFunctionCallOutput
+	| ResponsesReasoningItem
+	| ResponsesContextManagementItem;
+
 interface ResponsesInputMessage {
-	role: 'user' | 'assistant';
-	content: ResponsesContentPart[];
+	role: 'user' | 'system';
+	content: ResponsesInputContentPart[];
 }
 
-type ResponsesContentPart =
+interface ResponsesOutputMessage {
+	type: 'message';
+	role: 'assistant';
+	id: string;
+	status: 'completed';
+	content: ResponsesOutputContentPart[];
+}
+
+type ResponsesInputContentPart =
 	| { type: 'input_text'; text: string }
-	| { type: 'output_text'; text: string }
-	| { type: 'input_image'; image_url: string }
-	| { type: 'function_call'; call_id: string; name: string; arguments: string }
-	| { type: 'function_call_output'; call_id: string; output: string };
+	| { type: 'input_image'; image_url: string; detail?: 'auto' | 'low' | 'high' }
+	| { type: 'input_file'; filename: string; file_data: string };
+
+type ResponsesOutputContentPart =
+	| { type: 'output_text'; text: string; annotations: unknown[] }
+	| { type: 'refusal'; refusal: string };
+
+interface ResponsesFunctionCall {
+	type: 'function_call';
+	call_id: string;
+	name: string;
+	arguments: string;
+}
+
+interface ResponsesFunctionCallOutput {
+	type: 'function_call_output';
+	call_id: string;
+	output: string;
+}
+
+interface ResponsesReasoningItem {
+	type: 'reasoning';
+	id: string;
+	summary: unknown[];
+	encrypted_content: string;
+}
+
+interface ResponsesContextManagementItem {
+	type: 'compaction';
+	id: string;
+	encrypted_content: string;
+}
 
 interface ResponsesTool {
 	type: 'function';
 	name: string;
 	description: string;
 	parameters: object;
+	strict: false;
 }
 
 interface ResponsesStreamEvent {
@@ -109,6 +172,18 @@ interface ResponsesStreamEvent {
 	output_index?: number;
 	content_index?: number;
 	[key: string]: unknown;
+}
+
+interface ResponsesRequestStateOptions {
+	ignoreStatefulMarker: boolean;
+	webSocketStatefulMarker?: string;
+	allowPreviousResponseId: boolean;
+}
+
+interface StatefulMarkerData {
+	modelId: string;
+	marker: string;
+	connectionId?: string;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -137,6 +212,7 @@ export function deactivate(): void {
 
 class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<CustomLanguageModel>, vscode.Disposable {
 	private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
+	private readonly webSockets: ResponsesWebSocketManager;
 	private readonly disposables: vscode.Disposable[] = [this.onDidChangeEmitter];
 
 	public readonly onDidChangeLanguageModelChatInformation = this.onDidChangeEmitter.event;
@@ -144,7 +220,10 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 	public constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly output: vscode.OutputChannel
-	) {}
+	) {
+		this.webSockets = new ResponsesWebSocketManager(output);
+		this.disposables.push(this.webSockets);
+	}
 
 	public dispose(): void {
 		for (const disposable of this.disposables) {
@@ -217,7 +296,8 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(`Profile "${model.config.profileId}" is no longer configured.`);
 		}
 
-		const requestUrl = resolveResponsesRequestUrl(model.config.model.baseUrl || profile.baseUrl);
+		const baseUrl = model.config.model.baseUrl || profile.baseUrl;
+		const requestUrl = resolveResponsesRequestUrl(baseUrl);
 		if (!requestUrl) {
 			throw new Error(`Missing baseUrl for profile "${profile.id}".`);
 		}
@@ -225,20 +305,45 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(`Missing API key for profile "${profile.id}". Run "Custom OpenAI Responses: Set API Key".`);
 		}
 
-		const body = buildResponsesRequestBody(model, profile, messages, options, config);
 		const headers = buildHeaders(profile);
 		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		const useWebSocket = shouldUseWebSocketResponsesApi(model.config.model);
 
-		if (config.logRequests) {
+		if (useWebSocket) {
+			await this.provideWebSocketResponsesChatResponse(
+				model,
+				profile,
+				messages,
+				options,
+				progress,
+				token,
+				config,
+				requestUrl,
+				headers,
+				requestId
+			);
+			return;
+		}
+
+		const body = buildResponsesRequestBody(model, profile, messages, options, config, {
+			ignoreStatefulMarker: true,
+			allowPreviousResponseId: false
+		});
+		const requestBody = JSON.stringify(body);
+
+		if (shouldLogInfo(config.logLevel)) {
 			this.output.appendLine(
 				`[${requestId}] ${body.stream ? 'stream' : 'non-stream'} request profile=${profile.id} model=${body.model} url=${requestUrl}`
 			);
+		}
+		if (config.logLevel === 'debug') {
+			logDebugHttpRequest(this.output, requestId, requestUrl, headers, requestBody);
 		}
 
 		const response = await fetchWithRetry(requestUrl, {
 			method: 'POST',
 			headers,
-			body: JSON.stringify(body),
+			body: requestBody,
 			timeoutMs: config.requestTimeoutMs,
 			maxRetries: config.maxRetries,
 			token
@@ -248,15 +353,75 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(await formatHttpError(response));
 		}
 
-		if (body.stream) {
-			await readResponsesStream(response, progress, token);
-		} else {
-			const payload = await response.json() as unknown;
-			reportNonStreamingResponse(payload, progress);
+	if (body.stream) {
+		await readResponsesStream(response, progress, token, model.config.providerModelId);
+	} else {
+		const payload = await response.json() as unknown;
+		reportNonStreamingResponse(payload, progress, model.config.providerModelId);
 		}
 
-		if (config.logRequests) {
+		if (shouldLogInfo(config.logLevel)) {
 			this.output.appendLine(`[${requestId}] completed status=${response.status}`);
+		}
+	}
+
+	private async provideWebSocketResponsesChatResponse(
+		model: CustomLanguageModel,
+		profile: ProviderProfileConfig,
+		messages: readonly vscode.LanguageModelChatRequestMessage[],
+		options: vscode.ProvideLanguageModelChatResponseOptions,
+		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+		token: vscode.CancellationToken,
+		config: ExtensionConfig,
+		requestUrl: string,
+		headers: Record<string, string>,
+		requestId: string
+	): Promise<void> {
+		const modelIds = responseStateModelIds(model);
+		const messageMarker = getStatefulMarkerAndIndex(messages, modelIds)?.marker;
+		const connectionId = messageMarker?.connectionId ?? crypto.randomUUID();
+		const wasActive = this.webSockets.hasActiveConnection(connectionId);
+		const webSocketStatefulMarker = wasActive ? this.webSockets.getStatefulMarker(connectionId) : undefined;
+		const body = buildResponsesRequestBody(model, profile, messages, options, config, {
+			ignoreStatefulMarker: !wasActive || Boolean(model.config.model.zeroDataRetentionEnabled),
+			webSocketStatefulMarker,
+			allowPreviousResponseId: wasActive && !model.config.model.zeroDataRetentionEnabled
+		});
+		const webSocketUrl = resolveResponsesWebSocketUrl(requestUrl);
+		const connection = this.webSockets.getOrCreateConnection(connectionId, webSocketUrl, headers, requestId);
+
+		if (shouldLogInfo(config.logLevel)) {
+			this.output.appendLine(
+				`[${requestId}] websocket request profile=${profile.id} model=${body.model} url=${webSocketUrl}`
+			);
+		}
+		if (config.logLevel === 'debug') {
+			logDebugWebSocketRequest(this.output, requestId, webSocketUrl, headers, toResponsesWebSocketCreateMessage(body));
+		}
+
+		await connection.connect(config.requestTimeoutMs, token);
+		try {
+			await connection.sendRequest(body, progress, token, model.config.providerModelId, connectionId);
+		} catch (error) {
+			if (!body.previous_response_id || !isInvalidStatefulMarkerError(error)) {
+				throw error;
+			}
+
+			const retryBody = buildResponsesRequestBody(model, profile, messages, options, config, {
+				ignoreStatefulMarker: true,
+				allowPreviousResponseId: false
+			});
+			if (shouldLogInfo(config.logLevel)) {
+				this.output.appendLine(`[${requestId}] retrying websocket request without previous_response_id`);
+			}
+			if (config.logLevel === 'debug') {
+				logDebugWebSocketRequest(this.output, `${requestId}:retry`, webSocketUrl, headers, toResponsesWebSocketCreateMessage(retryBody));
+			}
+			await connection.sendRequest(retryBody, progress, token, model.config.providerModelId, connectionId);
+		}
+
+		if (shouldLogInfo(config.logLevel)) {
+			this.output.appendLine(`[${requestId}] websocket completed`);
 		}
 	}
 
@@ -362,13 +527,102 @@ async function readConfig(context: vscode.ExtensionContext): Promise<ExtensionCo
 		maxRetries: Math.max(0, Math.min(5, config.get<number>('maxRetries', 1))),
 		tokenEstimateCharsPerToken: Math.max(1, config.get<number>('tokenEstimateCharsPerToken', 4)),
 		modelNameTemplate: config.get<string>('modelNameTemplate', '${profileName}/${modelName}'),
-		logRequests: config.get<boolean>('logRequests', false),
+		logLevel: readLogLevel(config),
 		requestBodyOverrides
 	};
 }
 
 function getWorkspaceConfig(): vscode.WorkspaceConfiguration {
 	return vscode.workspace.getConfiguration(configSection);
+}
+
+function readLogLevel(config: vscode.WorkspaceConfiguration): LogLevel {
+	const rawLevel = config.get<string>('logLevel');
+	if (rawLevel === 'debug' || rawLevel === 'info' || rawLevel === 'off') {
+		return rawLevel;
+	}
+
+	const inspected = config.inspect<string>('logLevel');
+	const hasConfiguredLogLevel = Boolean(
+		inspected?.globalValue
+		?? inspected?.workspaceValue
+		?? inspected?.workspaceFolderValue
+		?? inspected?.defaultLanguageValue
+		?? inspected?.globalLanguageValue
+		?? inspected?.workspaceLanguageValue
+		?? inspected?.workspaceFolderLanguageValue
+	);
+	if (!hasConfiguredLogLevel && config.get<boolean>('logRequests', false)) {
+		return 'info';
+	}
+
+	return 'off';
+}
+
+function shouldLogInfo(logLevel: LogLevel): boolean {
+	return logLevel === 'info' || logLevel === 'debug';
+}
+
+function logDebugHttpRequest(
+	output: vscode.OutputChannel,
+	requestId: string,
+	requestUrl: string,
+	headers: Record<string, string>,
+	body: string
+): void {
+	output.appendLine(`[${requestId}] HTTP request`);
+	output.appendLine(`POST ${requestUrl}`);
+	output.appendLine(`headers: ${stringifyJsonForLog(redactHeaders(headers))}`);
+	output.appendLine(`body: ${formatJsonStringForLog(body)}`);
+}
+
+function logDebugWebSocketRequest(
+	output: vscode.OutputChannel,
+	requestId: string,
+	requestUrl: string,
+	headers: Record<string, string>,
+	message: Record<string, unknown>
+): void {
+	output.appendLine(`[${requestId}] WebSocket request`);
+	output.appendLine(`WS ${requestUrl}`);
+	output.appendLine(`headers: ${stringifyJsonForLog(redactHeaders(headers))}`);
+	output.appendLine(`message: ${stringifyJsonForLog(message)}`);
+}
+
+function redactHeaders(headers: Record<string, string>): Record<string, string> {
+	const redacted: Record<string, string> = {};
+	for (const [key, value] of Object.entries(headers)) {
+		redacted[key] = isSensitiveHeader(key) ? redactHeaderValue(value) : value;
+	}
+	return redacted;
+}
+
+function isSensitiveHeader(headerName: string): boolean {
+	const lower = headerName.toLowerCase();
+	return lower === 'authorization'
+		|| lower === 'api-key'
+		|| lower === 'x-api-key'
+		|| lower === 'openai-api-key'
+		|| lower.includes('token')
+		|| lower.includes('secret');
+}
+
+function redactHeaderValue(value: string): string {
+	const prefix = value.match(/^(\S+\s+)/)?.[1] ?? '';
+	return `${prefix}<redacted>`;
+}
+
+function formatJsonStringForLog(text: string): string {
+	const parsed = safeJsonParse(text);
+	return parsed === undefined ? text : stringifyJsonForLog(parsed);
+}
+
+function stringifyJsonForLog(value: unknown): string {
+	try {
+		return JSON.stringify(value, null, 2) ?? String(value);
+	} catch {
+		return String(value);
+	}
 }
 
 function secretKey(name: string): string {
@@ -461,7 +715,8 @@ function buildResponsesRequestBody(
 	profile: ProviderProfileConfig,
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	options: vscode.ProvideLanguageModelChatResponseOptions,
-	config: ExtensionConfig
+	config: ExtensionConfig,
+	stateOptions: ResponsesRequestStateOptions
 ): ResponsesRequestBody {
 	const modelOptions = normalizeObject(options.modelOptions);
 	const modelConfig = model.config.model;
@@ -474,11 +729,15 @@ function buildResponsesRequestBody(
 		model.maxOutputTokens
 	);
 
+	const apiModel = modelConfig.apiModel || modelConfig.id;
 	const body: ResponsesRequestBody = {
-		model: modelConfig.apiModel || modelConfig.id,
-		input: messages.map(toResponsesInputMessage),
+		model: apiModel,
+		...toResponsesInput(messages, [model.config.providerModelId, apiModel], stateOptions),
 		stream: config.enableStreaming,
 		max_output_tokens: maxOutputTokens,
+		store: false,
+		truncation: 'disabled',
+		include: ['reasoning.encrypted_content'],
 		reasoning: { effort }
 	};
 
@@ -492,10 +751,16 @@ function buildResponsesRequestBody(
 		body.top_p = topP;
 	}
 
+	if (readNestedBoolean(modelOptions, ['logprobs'])) {
+		body.top_logprobs = 3;
+	}
+
 	if (modelConfig.toolCalling && options.tools?.length) {
 		body.tools = options.tools.map(toResponsesTool);
 		if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
-			body.tool_choice = 'required';
+			body.tool_choice = options.tools.length === 1
+				? { type: 'function', name: options.tools[0].name }
+				: 'required';
 		} else {
 			body.tool_choice = 'auto';
 		}
@@ -509,75 +774,220 @@ function buildResponsesRequestBody(
 		sanitizeModelOptions(modelOptions)
 	) as ResponsesRequestBody;
 
-	return applyModelPatch(bodyWithOverrides, modelConfig.patch);
+	return applyResponsesRequestCompatibility(bodyWithOverrides, {
+		allowPreviousResponseId: stateOptions.allowPreviousResponseId,
+		zeroDataRetentionEnabled: Boolean(modelConfig.zeroDataRetentionEnabled),
+		patch: modelConfig.patch
+	});
 }
 
-function toResponsesInputMessage(message: vscode.LanguageModelChatRequestMessage): ResponsesInputMessage {
+function toResponsesInput(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	modelIds: readonly string[],
+	stateOptions: ResponsesRequestStateOptions
+): { input: ResponsesInputItem[]; previous_response_id?: string } {
+	const statefulMarker = getRequestStatefulMarker(messages, modelIds, stateOptions);
+	const inputMessages = statefulMarker ? messages.slice(statefulMarker.index + 1) : messages;
+	const input: ResponsesInputItem[] = [];
+
+	for (const message of inputMessages) {
+		input.push(...toResponsesInputItems(message));
+	}
+
 	return {
-		role: message.role === vscode.LanguageModelChatMessageRole.Assistant ? 'assistant' : 'user',
-		content: message.content.flatMap((part) => toResponsesContentParts(message.role, part))
+		input,
+		previous_response_id: statefulMarker?.marker.marker
 	};
 }
 
-function toResponsesContentParts(
-	role: vscode.LanguageModelChatMessageRole,
-	part: vscode.LanguageModelInputPart | unknown
-): ResponsesContentPart[] {
-	if (part instanceof vscode.LanguageModelTextPart) {
-		return [
-			{
-				type: role === vscode.LanguageModelChatMessageRole.Assistant ? 'output_text' : 'input_text',
-				text: part.value
+function getRequestStatefulMarker(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	modelIds: readonly string[],
+	stateOptions: ResponsesRequestStateOptions
+): { marker: StatefulMarkerData; index: number } | undefined {
+	if (stateOptions.ignoreStatefulMarker) {
+		return undefined;
+	}
+
+	if (stateOptions.webSocketStatefulMarker) {
+		const markerAndIndex = getStatefulMarkerAndIndex(messages, modelIds, stateOptions.webSocketStatefulMarker);
+		if (markerAndIndex) {
+			return markerAndIndex;
+		}
+		return undefined;
+	}
+
+	return getStatefulMarkerAndIndex(messages, modelIds);
+}
+
+function toResponsesInputItems(message: vscode.LanguageModelChatRequestMessage): ResponsesInputItem[] {
+	const items: ResponsesInputItem[] = [];
+
+	if (message.role === vscode.LanguageModelChatMessageRole.Assistant) {
+		items.push(...message.content.map(toResponsesRoundTripItem).filter(isDefined));
+
+		const outputContent = message.content
+			.map(toResponsesOutputContentPart)
+			.filter(isDefined);
+		if (outputContent.length) {
+			items.push({
+				type: 'message',
+				role: 'assistant',
+				id: 'msg_123',
+				status: 'completed',
+				content: outputContent
+			});
+		}
+
+		for (const part of message.content) {
+			if (part instanceof vscode.LanguageModelToolCallPart) {
+				items.push({
+					type: 'function_call',
+					call_id: part.callId,
+					name: part.name,
+					arguments: stringifyJson(part.input ?? {})
+				});
 			}
-		];
+		}
+
+		return items;
+	}
+
+	for (const part of message.content) {
+		if (part instanceof vscode.LanguageModelToolResultPart) {
+			items.push({
+				type: 'function_call_output',
+				call_id: part.callId,
+				output: toolResultText(part)
+			});
+			const images = part.content
+				.map(toResponsesInputContentPart)
+				.filter((contentPart): contentPart is ResponsesInputContentPart & { type: 'input_image' } => contentPart?.type === 'input_image');
+			if (images.length) {
+				items.push({
+					role: 'user',
+					content: [{ type: 'input_text', text: 'Image associated with the above tool call:' }, ...images]
+				});
+			}
+		}
+	}
+
+	const content = message.content
+		.filter((part) => !(part instanceof vscode.LanguageModelToolResultPart))
+		.map(toResponsesInputContentPart)
+		.filter(isDefined);
+
+	if (content.length) {
+		items.push({
+			role: isSystemMessageRole(message.role) ? 'system' : 'user',
+			content
+		});
+	}
+
+	return items;
+}
+
+function toResponsesInputContentPart(part: vscode.LanguageModelInputPart | unknown): ResponsesInputContentPart | undefined {
+	if (part instanceof vscode.LanguageModelTextPart) {
+		return { type: 'input_text', text: part.value };
 	}
 
 	if (part instanceof vscode.LanguageModelDataPart) {
-		if (part.mimeType.startsWith('image/')) {
-			const base64 = Buffer.from(part.data).toString('base64');
-			return [
-				{
-					type: 'input_image',
-					image_url: `data:${part.mimeType};base64,${base64}`
-				}
-			];
-		}
-
-		return [
-			{
-				type: role === vscode.LanguageModelChatMessageRole.Assistant ? 'output_text' : 'input_text',
-				text: decodeDataPart(part)
-			}
-		];
+		return dataPartToResponsesInput(part);
 	}
 
-	if (part instanceof vscode.LanguageModelToolCallPart) {
-		return [
-			{
-				type: 'function_call',
-				call_id: part.callId,
-				name: part.name,
-				arguments: JSON.stringify(part.input ?? {})
-			}
-		];
+	if (part instanceof vscode.LanguageModelToolCallPart || part instanceof vscode.LanguageModelToolResultPart) {
+		return undefined;
 	}
 
-	if (part instanceof vscode.LanguageModelToolResultPart) {
-		return [
-			{
-				type: 'function_call_output',
-				call_id: part.callId,
-				output: part.content.map(contentPartToText).join('\n')
-			}
-		];
+	return { type: 'input_text', text: stringifyUnknown(part) };
+}
+
+function toResponsesRoundTripItem(part: vscode.LanguageModelInputPart | unknown): ResponsesInputItem | undefined {
+	if (part instanceof vscode.LanguageModelDataPart) {
+		return dataPartToResponsesInputItem(part);
 	}
 
-	return [
-		{
-			type: role === vscode.LanguageModelChatMessageRole.Assistant ? 'output_text' : 'input_text',
-			text: stringifyUnknown(part)
-		}
-	];
+	const thinking = toLanguageModelThinkingPartLike(part);
+	if (!thinking?.id) {
+		return undefined;
+	}
+
+	const encrypted = readMetadataString(thinking.metadata, 'encrypted_content')
+		?? readMetadataString(thinking.metadata, 'encrypted')
+		?? readMetadataString(thinking.metadata, 'reasoning_opaque');
+	if (!encrypted) {
+		return undefined;
+	}
+
+	return {
+		type: 'reasoning',
+		id: thinking.id,
+		summary: [],
+		encrypted_content: encrypted
+	};
+}
+
+function toResponsesOutputContentPart(part: vscode.LanguageModelInputPart | unknown): ResponsesOutputContentPart | undefined {
+	if (part instanceof vscode.LanguageModelTextPart && part.value.trim()) {
+		return { type: 'output_text', text: part.value, annotations: [] };
+	}
+	return undefined;
+}
+
+function dataPartToResponsesInputItem(part: vscode.LanguageModelDataPart): ResponsesInputItem | undefined {
+	if (part.mimeType !== 'context_management') {
+		return undefined;
+	}
+
+	const value = safeJsonParse(decodeDataPart(part));
+	const record = asRecord(value);
+	if (record?.type !== 'compaction') {
+		return undefined;
+	}
+
+	const id = stringValue(record.id);
+	const encryptedContent = stringValue(record.encrypted_content);
+	if (!id || !encryptedContent) {
+		return undefined;
+	}
+
+	return {
+		type: 'compaction',
+		id,
+		encrypted_content: encryptedContent
+	};
+}
+
+function dataPartToResponsesInput(part: vscode.LanguageModelDataPart): ResponsesInputContentPart | undefined {
+	if (part.mimeType === statefulMarkerMimeType || part.mimeType === 'cache_control' || part.mimeType === 'context_management') {
+		return undefined;
+	}
+
+	if (part.mimeType.startsWith('image/')) {
+		return {
+			type: 'input_image',
+			image_url: dataUrlFromDataPart(part),
+			detail: 'auto'
+		};
+	}
+
+	if (part.mimeType.startsWith('text/') || part.mimeType === 'application/json') {
+		return { type: 'input_text', text: decodeDataPart(part) };
+	}
+
+	return {
+		type: 'input_file',
+		filename: `input.${extensionFromMimeType(part.mimeType)}`,
+		file_data: dataUrlFromDataPart(part)
+	};
+}
+
+function toolResultText(part: vscode.LanguageModelToolResultPart): string {
+	return part.content
+		.filter((contentPart) => !(contentPart instanceof vscode.LanguageModelDataPart && contentPart.mimeType.startsWith('image/')))
+		.map(contentPartToText)
+		.join('');
 }
 
 function toResponsesTool(tool: vscode.LanguageModelChatTool): ResponsesTool {
@@ -585,7 +995,8 @@ function toResponsesTool(tool: vscode.LanguageModelChatTool): ResponsesTool {
 		type: 'function',
 		name: tool.name,
 		description: tool.description,
-		parameters: tool.inputSchema ?? { type: 'object', properties: {} }
+		parameters: tool.inputSchema ?? { type: 'object', properties: {} },
+		strict: false
 	};
 }
 
@@ -654,7 +1065,8 @@ async function fetchOnce(requestUrl: string, options: FetchOptions): Promise<Res
 async function readResponsesStream(
 	response: Response,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-	token: vscode.CancellationToken
+	token: vscode.CancellationToken,
+	modelId: string
 ): Promise<void> {
 	if (!response.body) {
 		throw new Error('Streaming response did not include a body.');
@@ -681,20 +1093,312 @@ async function readResponsesStream(
 		while (separatorIndex >= 0) {
 			const rawEvent = buffer.slice(0, separatorIndex);
 			buffer = buffer.slice(separatorIndex + sseSeparatorLength(buffer, separatorIndex));
-			handleSseEvent(rawEvent, progress, toolCalls);
+			handleSseEvent(rawEvent, progress, toolCalls, modelId);
 			separatorIndex = findSseSeparator(buffer);
 		}
 	}
 
 	if (buffer.trim().length > 0) {
-		handleSseEvent(buffer, progress, toolCalls);
+		handleSseEvent(buffer, progress, toolCalls, modelId);
+	}
+}
+
+class ResponsesWebSocketManager implements vscode.Disposable {
+	private readonly connections = new Map<string, ResponsesWebSocketConnection>();
+
+	public constructor(private readonly output: vscode.OutputChannel) {}
+
+	public getOrCreateConnection(
+		connectionId: string,
+		url: string,
+		headers: Record<string, string>,
+		initiatingRequestId: string
+	): ResponsesWebSocketConnection {
+		const existing = this.connections.get(connectionId);
+		if (existing?.isOpen || existing?.isConnecting) {
+			return existing;
+		}
+		existing?.dispose();
+
+		const connection = new ResponsesWebSocketConnection(
+			connectionId,
+			url,
+			headers,
+			initiatingRequestId,
+			this.output,
+			() => {
+				if (this.connections.get(connectionId) === connection) {
+					this.connections.delete(connectionId);
+				}
+			}
+		);
+		this.connections.set(connectionId, connection);
+		return connection;
+	}
+
+	public hasActiveConnection(connectionId: string): boolean {
+		const connection = this.connections.get(connectionId);
+		return Boolean(connection?.isOpen || connection?.isConnecting);
+	}
+
+	public getStatefulMarker(connectionId: string): string | undefined {
+		const connection = this.connections.get(connectionId);
+		return connection?.isOpen ? connection.statefulMarker : undefined;
+	}
+
+	public dispose(): void {
+		for (const connection of this.connections.values()) {
+			connection.dispose();
+		}
+		this.connections.clear();
+	}
+}
+
+class ResponsesWebSocketConnection implements vscode.Disposable {
+	private ws: WebSocket | undefined;
+	private connectPromise: Promise<void> | undefined;
+	private activeRequest: ResponsesWebSocketActiveRequest | undefined;
+	private disposed = false;
+	private open = false;
+	private marker: string | undefined;
+
+	public constructor(
+		private readonly connectionId: string,
+		private readonly url: string,
+		private readonly headers: Record<string, string>,
+		private readonly initiatingRequestId: string,
+		private readonly output: vscode.OutputChannel,
+		private readonly onDispose: () => void
+	) {}
+
+	public get isOpen(): boolean {
+		return this.open && !this.disposed && this.ws !== undefined;
+	}
+
+	public get isConnecting(): boolean {
+		return !this.disposed && this.connectPromise !== undefined && !this.open;
+	}
+
+	public get statefulMarker(): string | undefined {
+		return this.marker;
+	}
+
+	public async connect(timeoutMs: number, token: vscode.CancellationToken): Promise<void> {
+		if (this.isOpen) {
+			return;
+		}
+		if (this.connectPromise) {
+			await this.connectPromise;
+			return;
+		}
+
+		this.connectPromise = this.connectOnce(timeoutMs, token);
+		try {
+			await this.connectPromise;
+		} finally {
+			if (!this.open) {
+				this.connectPromise = undefined;
+			}
+		}
+	}
+
+	private async connectOnce(timeoutMs: number, token: vscode.CancellationToken): Promise<void> {
+		if (typeof WebSocket === 'undefined') {
+			throw new Error('WebSocket is not available in this VS Code extension host.');
+		}
+
+		const WebSocketCtor = WebSocket as unknown as {
+			new(url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }): WebSocket;
+		};
+		const ws = new WebSocketCtor(this.url, [], { headers: this.headers });
+		this.ws = ws;
+
+		await new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				cleanup();
+				this.dispose();
+				reject(new Error(`WebSocket connection timed out after ${timeoutMs}ms.`));
+			}, timeoutMs);
+			const cancellation = token.onCancellationRequested(() => {
+				cleanup();
+				this.dispose();
+				reject(new vscode.CancellationError());
+			});
+			const cleanup = () => {
+				clearTimeout(timeout);
+				cancellation.dispose();
+				ws.removeEventListener('open', onOpen);
+				ws.removeEventListener('error', onError);
+				ws.removeEventListener('close', onClose);
+			};
+			const onOpen = () => {
+				cleanup();
+				if (this.disposed) {
+					reject(new Error('WebSocket connection disposed during setup.'));
+					return;
+				}
+				this.open = true;
+				this.setupMessageHandlers(ws);
+				resolve();
+			};
+			const onError = (event: Event) => {
+				cleanup();
+				this.open = false;
+				reject(new Error(webSocketEventErrorMessage(event, 'WebSocket connection error')));
+			};
+			const onClose = (event: CloseEvent) => {
+				cleanup();
+				this.open = false;
+				reject(new Error(`WebSocket closed during connection setup: ${formatWebSocketClose(event)}`));
+			};
+
+			ws.addEventListener('open', onOpen);
+			ws.addEventListener('error', onError);
+			ws.addEventListener('close', onClose);
+		});
+	}
+
+	private setupMessageHandlers(ws: WebSocket): void {
+		ws.addEventListener('message', (event: MessageEvent) => {
+			if (typeof event.data !== 'string') {
+				return;
+			}
+
+			const parsed = safeJsonParse(event.data);
+			if (!isRecord(parsed)) {
+				this.activeRequest?.reject(new Error('Received invalid JSON from Responses WebSocket.'));
+				return;
+			}
+
+			if (parsed.type === 'response.completed') {
+				const responseId = stringValue(asRecord(parsed.response)?.id);
+				if (responseId) {
+					this.marker = responseId;
+				}
+			}
+
+			this.activeRequest?.handleEvent(parsed as ResponsesStreamEvent);
+		});
+
+		ws.addEventListener('error', (event: Event) => {
+			const error = new Error(webSocketEventErrorMessage(event, 'WebSocket error'));
+			this.activeRequest?.reject(error);
+		});
+
+		ws.addEventListener('close', (event: CloseEvent) => {
+			this.open = false;
+			this.ws = undefined;
+			const request = this.activeRequest;
+			this.activeRequest = undefined;
+			if (request && !request.settled) {
+				request.reject(new Error(`WebSocket closed: ${formatWebSocketClose(event)}`));
+			}
+			this.onDispose();
+		});
+	}
+
+	public async sendRequest(
+		body: ResponsesRequestBody,
+		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+		token: vscode.CancellationToken,
+		modelId: string,
+		connectionId: string
+	): Promise<void> {
+		if (!this.ws || !this.isOpen) {
+			throw new Error('WebSocket is not connected.');
+		}
+
+		this.activeRequest?.reject(new Error('Request superseded by new WebSocket request.'));
+		const request = new ResponsesWebSocketActiveRequest(progress, modelId, connectionId);
+		this.activeRequest = request;
+		const cancellation = token.onCancellationRequested(() => request.reject(new vscode.CancellationError()));
+		request.done.finally(() => cancellation.dispose()).catch(() => undefined);
+
+		this.ws.send(JSON.stringify(toResponsesWebSocketCreateMessage(body)));
+		try {
+			await request.done;
+		} finally {
+			if (this.activeRequest === request) {
+				this.activeRequest = undefined;
+			}
+		}
+	}
+
+	public dispose(): void {
+		if (this.disposed) {
+			return;
+		}
+		this.disposed = true;
+		this.open = false;
+		this.activeRequest?.reject(new Error('WebSocket connection disposed.'));
+		this.activeRequest = undefined;
+		if (this.ws) {
+			this.ws.close();
+			this.ws = undefined;
+		}
+		this.output.appendLine(`[${this.initiatingRequestId}] closed websocket connection ${this.connectionId}`);
+		this.onDispose();
+	}
+}
+
+class ResponsesWebSocketActiveRequest {
+	private readonly toolCalls = new Map<number, { callId?: string; name?: string; arguments: string }>();
+	private resolveDone!: () => void;
+	private rejectDone!: (error: Error) => void;
+	private isSettled = false;
+	public readonly done: Promise<void>;
+
+	public constructor(
+		private readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+		private readonly modelId: string,
+		private readonly connectionId: string
+	) {
+		this.done = new Promise<void>((resolve, reject) => {
+			this.resolveDone = resolve;
+			this.rejectDone = reject;
+		});
+	}
+
+	public get settled(): boolean {
+		return this.isSettled;
+	}
+
+	public handleEvent(event: ResponsesStreamEvent): void {
+		if (this.isSettled) {
+			return;
+		}
+
+		if (event.type === 'error') {
+			this.reject(new Error(formatResponsesErrorEvent(event)));
+			return;
+		}
+
+		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.modelId, this.connectionId);
+
+		if (isResponsesTerminalEvent(event)) {
+			this.isSettled = true;
+			if (event.type === 'response.failed' || event.type === 'response.incomplete' || event.type === 'response.cancelled') {
+				this.rejectDone(new Error(formatResponsesTerminalEvent(event)));
+			} else {
+				this.resolveDone();
+			}
+		}
+	}
+
+	public reject(error: Error): void {
+		if (this.isSettled) {
+			return;
+		}
+		this.isSettled = true;
+		this.rejectDone(error);
 	}
 }
 
 function handleSseEvent(
 	rawEvent: string,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>
+	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
+	modelId: string
 ): void {
 	const dataLines = rawEvent
 		.split(/\r?\n/)
@@ -715,13 +1419,15 @@ function handleSseEvent(
 		return;
 	}
 
-	reportResponsesStreamEvent(event as ResponsesStreamEvent, progress, toolCalls);
+	reportResponsesStreamEvent(event as ResponsesStreamEvent, progress, toolCalls, modelId);
 }
 
 function reportResponsesStreamEvent(
 	event: ResponsesStreamEvent,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>
+	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
+	modelId: string,
+	connectionId?: string
 ): void {
 	switch (event.type) {
 		case 'response.output_text.delta':
@@ -738,6 +1444,11 @@ function reportResponsesStreamEvent(
 			break;
 		case 'response.output_item.done':
 			reportToolCallDone(event, toolCalls, progress);
+			break;
+		case 'response.completed':
+			if (connectionId) {
+				reportStatefulMarker(event.response, modelId, progress, connectionId);
+			}
 			break;
 		default:
 			break;
@@ -797,7 +1508,11 @@ function reportToolCallDone(
 	toolCalls.delete(index);
 }
 
-function reportNonStreamingResponse(payload: unknown, progress: vscode.Progress<vscode.LanguageModelResponsePart>): void {
+function reportNonStreamingResponse(
+	payload: unknown,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	modelId: string
+): void {
 	for (const text of extractTextFromResponsesPayload(payload)) {
 		progress.report(new vscode.LanguageModelTextPart(text));
 	}
@@ -853,6 +1568,55 @@ function extractToolCallsFromResponsesPayload(payload: unknown): Array<{ callId:
 	}
 
 	return toolCalls;
+}
+
+function isResponsesTerminalEvent(event: ResponsesStreamEvent): boolean {
+	return event.type === 'response.completed'
+		|| event.type === 'response.failed'
+		|| event.type === 'response.incomplete'
+		|| event.type === 'response.cancelled';
+}
+
+function formatResponsesErrorEvent(event: ResponsesStreamEvent): string {
+	const error = asRecord(event.error);
+	const code = stringValue(error?.code) ?? stringValue(event.code);
+	const message = stringValue(error?.message) ?? stringValue(event.message) ?? 'Responses WebSocket error';
+	return code ? `${message} (${code})` : message;
+}
+
+function formatResponsesTerminalEvent(event: ResponsesStreamEvent): string {
+	const response = asRecord(event.response);
+	const responseError = asRecord(response?.error);
+	const code = stringValue(responseError?.code) ?? stringValue(response?.status);
+	const message = stringValue(responseError?.message) ?? `Responses WebSocket ended with ${event.type}`;
+	return code ? `${message} (${code})` : message;
+}
+
+function isInvalidStatefulMarkerError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	const normalized = message.toLowerCase();
+	return normalized.includes('previous_response_id')
+		&& (
+			normalized.includes('not found')
+			|| normalized.includes('invalid')
+			|| normalized.includes('expired')
+			|| normalized.includes('stateful')
+			|| normalized.includes('conversation')
+		);
+}
+
+function webSocketEventErrorMessage(event: Event, fallback: string): string {
+	const eventRecord = asRecord(event);
+	const eventError = eventRecord?.error;
+	const message = stringValue(eventRecord?.message)
+		?? (eventError instanceof Error ? eventError.message : undefined)
+		?? fallback;
+	return message;
+}
+
+function formatWebSocketClose(event: CloseEvent): string {
+	const reason = event.reason ? `, reason: ${event.reason}` : '';
+	return `code=${event.code}${reason}, wasClean=${event.wasClean}`;
 }
 
 async function formatHttpError(response: Response): Promise<string> {
@@ -989,11 +1753,13 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 			maxInputTokens: 128000,
 			maxOutputTokens: 16384,
 			toolCalling: true,
-			vision: true,
-			reasoningEffort: 'medium',
-			patch: {
-				dropTruncation: false
-			}
+				vision: true,
+				reasoningEffort: 'medium',
+				zeroDataRetentionEnabled: false,
+				supportedEndpoints: [responsesEndpoint],
+				patch: {
+					dropTruncation: false
+				}
 		}];
 	}
 
@@ -1021,10 +1787,22 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 				toolCalling: model.toolCalling ?? false,
 				vision: Boolean(model.vision),
 				reasoningEffort: normalizeReasoningEffort(model.reasoningEffort, 'medium'),
+				zeroDataRetentionEnabled: readBoolean(model.zeroDataRetentionEnabled, false),
+				supportedEndpoints: normalizeSupportedEndpoints(model.supportedEndpoints),
 				extraBody: normalizeObject(model.extraBody),
 				patch: normalizeModelPatch(model.patch)
 			};
 		});
+}
+
+function normalizeSupportedEndpoints(value: unknown): ModelSupportedEndpoint[] {
+	if (!Array.isArray(value)) {
+		return [responsesEndpoint];
+	}
+	const supported = value.filter((entry): entry is ModelSupportedEndpoint =>
+		entry === responsesEndpoint || entry === webSocketResponsesEndpoint
+	);
+	return supported.length > 0 ? supported : [responsesEndpoint];
 }
 
 function normalizeModelPatch(value: unknown): ModelPatchConfig {
@@ -1103,6 +1881,46 @@ function resolveResponsesRequestUrl(baseUrl: string): string {
 	}
 }
 
+function resolveResponsesWebSocketUrl(requestUrl: string): string {
+	const rawRequestUrl = trim(requestUrl);
+	if (!rawRequestUrl) {
+		return '';
+	}
+
+	try {
+		const url = new URL(rawRequestUrl);
+		if (url.protocol === 'https:') {
+			url.protocol = 'wss:';
+		} else if (url.protocol === 'http:') {
+			url.protocol = 'ws:';
+		}
+		url.hash = '';
+		return url.toString();
+	} catch {
+		return rawRequestUrl
+			.replace(/^https:\/\//i, 'wss://')
+			.replace(/^http:\/\//i, 'ws://');
+	}
+}
+
+function shouldUseWebSocketResponsesApi(model: ModelConfig): boolean {
+	return model.supportedEndpoints?.includes(webSocketResponsesEndpoint) ?? false;
+}
+
+function toResponsesWebSocketCreateMessage(body: ResponsesRequestBody): Record<string, unknown> {
+	const { stream: _stream, ...rest } = body;
+	return {
+		type: 'response.create',
+		...rest,
+		initiator: 'user'
+	};
+}
+
+function responseStateModelIds(model: CustomLanguageModel): string[] {
+	const apiModel = model.config.model.apiModel || model.config.model.id;
+	return [model.config.providerModelId, apiModel];
+}
+
 function hostnameOrUrl(urlValue: string): string {
 	try {
 		const url = new URL(urlValue);
@@ -1119,13 +1937,30 @@ function mergeObjects(...objects: Array<Record<string, unknown>>): Record<string
 function sanitizeModelOptions(modelOptions: Record<string, unknown>): Record<string, unknown> {
 	const sanitized = { ...modelOptions };
 	delete sanitized.reasoningEffort;
+	delete sanitized.max_output_tokens;
 	delete sanitized.maxOutputTokens;
+	delete sanitized.top_p;
 	delete sanitized.topP;
 	return sanitized;
 }
 
-function applyModelPatch(body: ResponsesRequestBody, patch: ModelPatchConfig | undefined): ResponsesRequestBody {
-	if (patch?.dropTruncation) {
+function applyResponsesRequestCompatibility(
+	body: ResponsesRequestBody,
+	options: {
+		allowPreviousResponseId: boolean;
+		zeroDataRetentionEnabled: boolean;
+		patch: ModelPatchConfig | undefined;
+	}
+): ResponsesRequestBody {
+	if ('previous_response_id' in body && (
+		!options.allowPreviousResponseId
+		|| options.zeroDataRetentionEnabled
+		|| typeof body.previous_response_id !== 'string'
+		|| !body.previous_response_id.startsWith('resp_')
+	)) {
+		delete body.previous_response_id;
+	}
+	if (options.patch?.dropTruncation) {
 		delete body.truncation;
 	}
 	return body;
@@ -1141,6 +1976,11 @@ function readNestedNumber(object: Record<string, unknown>, path: string[]): numb
 	return typeof value === 'number' ? value : undefined;
 }
 
+function readNestedBoolean(object: Record<string, unknown>, path: string[]): boolean | undefined {
+	const value = readNestedValue(object, path);
+	return typeof value === 'boolean' ? value : undefined;
+}
+
 function readNestedValue(object: Record<string, unknown>, path: string[]): unknown {
 	let current: unknown = object;
 	for (const segment of path) {
@@ -1152,8 +1992,25 @@ function readNestedValue(object: Record<string, unknown>, path: string[]): unkno
 	return current;
 }
 
+function readMetadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
+	const value = metadata?.[key];
+	return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 function trim(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
+}
+
+function isDefined<T>(value: T | undefined | null): value is T {
+	return value !== undefined && value !== null;
+}
+
+function stringifyJson(value: unknown): string {
+	try {
+		return JSON.stringify(value) ?? '{}';
+	} catch {
+		return '{}';
+	}
 }
 
 function stringifyUnknown(value: unknown): string {
@@ -1161,10 +2018,110 @@ function stringifyUnknown(value: unknown): string {
 		return value;
 	}
 	try {
-		return JSON.stringify(value);
+		return JSON.stringify(value) ?? String(value);
 	} catch {
 		return String(value);
 	}
+}
+
+function dataUrlFromDataPart(part: vscode.LanguageModelDataPart): string {
+	return `data:${part.mimeType};base64,${Buffer.from(part.data).toString('base64')}`;
+}
+
+function extensionFromMimeType(mimeType: string): string {
+	const normalized = mimeType.toLowerCase().split(';', 1)[0].trim();
+	const known: Record<string, string> = {
+		'application/json': 'json',
+		'application/pdf': 'pdf',
+		'text/html': 'html',
+		'text/markdown': 'md',
+		'text/plain': 'txt',
+		'image/gif': 'gif',
+		'image/jpeg': 'jpg',
+		'image/png': 'png',
+		'image/webp': 'webp'
+	};
+	return known[normalized] ?? normalized.split('/').pop()?.replace(/[^a-z0-9.+-]/g, '') ?? 'bin';
+}
+
+function isSystemMessageRole(role: vscode.LanguageModelChatMessageRole): boolean {
+	const systemRole = (vscode.LanguageModelChatMessageRole as unknown as Record<string, number>).System ?? 3;
+	return role === systemRole;
+}
+
+function encodeStatefulMarker(modelId: string, marker: string, connectionId?: string): Uint8Array {
+	return new TextEncoder().encode(JSON.stringify({ modelId, marker, connectionId }));
+}
+
+function decodeStatefulMarker(data: Uint8Array): StatefulMarkerData | undefined {
+	const decoded = new TextDecoder().decode(data);
+	const parsed = safeJsonParse(decoded);
+	if (isRecord(parsed)) {
+		const modelId = stringValue(parsed.modelId);
+		const marker = stringValue(parsed.marker);
+		const connectionId = stringValue(parsed.connectionId);
+		return modelId && marker ? { modelId, marker, connectionId } : undefined;
+	}
+
+	const separator = decoded.indexOf('\\');
+	if (separator < 0) {
+		return undefined;
+	}
+	const modelId = decoded.slice(0, separator);
+	const marker = decoded.slice(separator + 1);
+	return modelId && marker ? { modelId, marker } : undefined;
+}
+
+function getStatefulMarkerAndIndex(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	modelIds: readonly string[],
+	expectedMarker?: string
+): { marker: StatefulMarkerData; index: number } | undefined {
+	const expectedModelIds = new Set(modelIds.filter((modelId) => modelId.length > 0));
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message.role !== vscode.LanguageModelChatMessageRole.Assistant) {
+			continue;
+		}
+		for (const part of message.content) {
+			if (!(part instanceof vscode.LanguageModelDataPart) || part.mimeType !== statefulMarkerMimeType) {
+				continue;
+			}
+			const marker = decodeStatefulMarker(part.data);
+			if (marker && expectedModelIds.has(marker.modelId) && (!expectedMarker || marker.marker === expectedMarker)) {
+				return { marker, index };
+			}
+		}
+	}
+	return undefined;
+}
+
+function reportStatefulMarker(
+	response: unknown,
+	modelId: string,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	connectionId?: string
+): void {
+	const responseId = stringValue(asRecord(response)?.id);
+	if (!responseId) {
+		return;
+	}
+	progress.report(new vscode.LanguageModelDataPart(encodeStatefulMarker(modelId, responseId, connectionId), statefulMarkerMimeType));
+}
+
+function toLanguageModelThinkingPartLike(part: unknown): LanguageModelThinkingPartLike | undefined {
+	if (!isRecord(part) || !('value' in part)) {
+		return undefined;
+	}
+
+	const value = part.value;
+	if (typeof value !== 'string' && !Array.isArray(value)) {
+		return undefined;
+	}
+
+	const id = typeof part.id === 'string' ? part.id : undefined;
+	const metadata = isRecord(part.metadata) ? part.metadata : undefined;
+	return { value, id, metadata };
 }
 
 function safeJsonParse(text: string): unknown {

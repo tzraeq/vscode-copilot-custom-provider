@@ -57,7 +57,8 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "name": "GPT-5.5",
           "toolCalling": true,
           "vision": true,
-          "reasoningEffort": "medium"
+          "reasoningEffort": "medium",
+          "supportedEndpoints": ["/responses", "ws:/responses"]
         }
       ]
     }
@@ -140,6 +141,8 @@ Model fields:
 | `reasoningEffort` | No | global default | Sent as `reasoning.effort`. Values: `minimal`, `low`, `medium`, `high`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
+| `zeroDataRetentionEnabled` | No | `false` | Matches VS Code Custom Endpoint naming. When `true`, `previous_response_id` is not sent. |
+| `supportedEndpoints` | No | `["/responses"]` | Matches VS Code Custom Endpoint endpoint metadata. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
 | `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
 
@@ -154,10 +157,21 @@ Global fields:
 | `copilotCustomProvider.maxRetries` | `1` | Retry count for failed non-cancelled HTTP requests. |
 | `copilotCustomProvider.tokenEstimateCharsPerToken` | `4` | Fallback token estimate used by VS Code. |
 | `copilotCustomProvider.modelNameTemplate` | `${profileName}/${modelName}` | Template for model names shown in the picker. |
-| `copilotCustomProvider.logRequests` | `false` | Log request metadata. Bodies and keys are not logged. |
+| `copilotCustomProvider.logLevel` | `off` | Output logging level. Set `debug` to log outgoing HTTP request headers and body. |
+| `copilotCustomProvider.logRequests` | `false` | Legacy metadata logging switch. Prefer `logLevel`. |
 | `copilotCustomProvider.requestBodyOverrides` | `{}` | JSON fields merged into every request. |
 
 `modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${baseUrlHost}`. Copilot reliably shows the model name and tooltip; the tooltip is kept to a single line and only shows API key status when a required key is missing.
+
+For request debugging, set:
+
+```json
+{
+  "copilotCustomProvider.logLevel": "debug"
+}
+```
+
+Debug logs are written to the `Custom OpenAI Responses` output channel. API key headers are redacted, but request bodies can contain prompt and workspace content.
 
 Request body merge order:
 
@@ -166,6 +180,12 @@ provider defaults -> global requestBodyOverrides -> profile requestBodyOverrides
 ```
 
 `patch.dropTruncation` is a compatibility switch. Some third-party relay APIs do not correctly process Copilot's `truncation: "disabled"` field in Responses API requests. If debugging shows that this field causes the relay to reject or mishandle requests, set `patch.dropTruncation` to `true` for that model.
+
+By default, this extension uses HTTP/SSE for Responses requests. To match VS Code's non-WebSocket Custom Endpoint path, HTTP/SSE requests do not send `previous_response_id`; the full available message history is sent instead.
+
+To use the official-style Responses WebSocket v2 path, declare `ws:/responses` in the model's `supportedEndpoints`. This mirrors VS Code's Custom Endpoint metadata: the setting is the capability declaration, and the extension automatically chooses WebSocket for that model. It does not probe or infer WebSocket support from the URL.
+
+When WebSocket is selected, the extension converts the Responses URL from `https://.../v1/responses` to `wss://.../v1/responses`, sends `response.create` messages without the HTTP `stream` field, and reuses the returned `response.id` as `previous_response_id` on later turns in the same active chat connection. If `zeroDataRetentionEnabled` is `true`, `previous_response_id` is still suppressed.
 
 ## Model IDs
 
@@ -191,6 +211,6 @@ Third-party VS Code language model providers do not get Copilot's native Thinkin
 
 To give users a picker-level choice, expose multiple entries with the same upstream `id` and different `providerId` values, such as `gpt-5-low`, `gpt-5-medium`, and `gpt-5-high`.
 
-## HTTP Forwarding
+## Forwarding
 
 Requests are sent with the VS Code extension runtime's built-in `fetch`, with `AbortController` for timeout and cancellation. No third-party HTTP client is used.

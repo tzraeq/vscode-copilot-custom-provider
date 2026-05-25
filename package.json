@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/tzraeq/vscode-copilot-custom-provider.git"
   },
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "tzraeq",
   "license": "MIT",
   "homepage": "https://github.com/tzraeq/vscode-copilot-custom-provider",
@@ -253,6 +253,25 @@
                       "maximum": 1,
                       "description": "Optional top_p sent to the Responses API request."
                     },
+                    "zeroDataRetentionEnabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "markdownDescription": "Whether Zero Data Retention (ZDR) is enabled for this endpoint. When `true`, `previous_response_id` will not be sent in Responses API requests."
+                    },
+                    "supportedEndpoints": {
+                      "type": "array",
+                      "default": [
+                        "/responses"
+                      ],
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "/responses",
+                          "ws:/responses"
+                        ]
+                      },
+                      "markdownDescription": "Responses endpoints supported by this model, aligned with VS Code Custom Endpoint metadata. Include `ws:/responses` to send requests over Responses WebSocket v2; otherwise the extension uses HTTP/SSE `/responses`."
+                    },
                     "extraBody": {
                       "type": "object",
                       "additionalProperties": true,
@@ -326,11 +345,22 @@
           "scope": "resource",
           "markdownDescription": "Template for model names shown in the Copilot/Chat model picker. Useful because all models share the `Custom OpenAI Responses` provider group. Supported placeholders: `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, `${baseUrlHost}`."
         },
+        "copilotCustomProvider.logLevel": {
+          "type": "string",
+          "default": "off",
+          "enum": [
+            "off",
+            "info",
+            "debug"
+          ],
+          "scope": "machine-overridable",
+          "markdownDescription": "Logging level for the extension output channel. `off` disables request logs, `info` logs request metadata, and `debug` logs the outgoing HTTP request including redacted headers and JSON body. Debug logs can contain prompt content."
+        },
         "copilotCustomProvider.logRequests": {
           "type": "boolean",
           "default": false,
           "scope": "machine-overridable",
-          "description": "Write request metadata to the extension output channel. Request bodies and API keys are never logged."
+          "markdownDescription": "Legacy request metadata logging switch. Prefer `copilotCustomProvider.logLevel`; when `logLevel` is not configured, `true` is treated as `logLevel: \"info\"`."
         },
         "copilotCustomProvider.requestBodyOverrides": {
           "type": "object",
