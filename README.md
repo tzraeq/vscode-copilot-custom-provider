@@ -1,6 +1,6 @@
 # Copilot Custom Provider
 
-Adds a VS Code language model provider named `Custom OpenAI Responses` for OpenAI **Responses** API compatible services.
+Adds a VS Code language model provider named `Custom OpenAI Responses` for OpenAI **Responses API** compatible services.
 
 This extension does not replace or proxy GitHub Copilot's built-in models. It adds separate custom models to the VS Code/Copilot model picker.
 
@@ -74,18 +74,14 @@ Custom OpenAI Responses: Set API Key
 
 This step is important. `settings.json` defines the profiles and models, but the key is normally stored separately in VS Code SecretStorage. The command asks which profile to update. Custom models can appear in the Copilot/Chat model picker before a key is set, but a request will fail until the selected profile has a key or `requireApiKey` is `false`.
 
-`baseUrl` can be either:
+## Base URL
 
-- `https://host-a.example.com` or `https://host-a.example.com:8443`: the extension sends requests to `https://host-a.example.com/v1/responses` automatically.
-- `https://host-a.example.com/proxy/v1/responses`: the extension uses this URL exactly as configured. Use this form when a relay service has an extra path segment.
+`baseUrl` can be either a host root or a full Responses API URL:
 
-By default, model names are shown as:
+- `https://host-a.example.com` or `https://host-a.example.com:8443`: requests are sent to `/v1/responses` automatically.
+- `https://host-a.example.com/proxy/v1/responses`: this URL is used exactly as configured. Use this form when a relay service has an extra path segment.
 
-```text
-Host A/GPT-5.5
-```
-
-This keeps models from different profiles distinguishable inside the single `Custom OpenAI Responses` provider group.
+The same rule applies to model-level `baseUrl`. If a model does not set `baseUrl`, it uses the profile `baseUrl`.
 
 ## API Keys
 
@@ -106,9 +102,7 @@ Authorization: Bearer <key>
 
 Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a different auth header.
 
-## Field Reference
-
-Profile fields:
+## Profile Fields
 
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -123,7 +117,7 @@ Profile fields:
 | `requestBodyOverrides` | No | `{}` | JSON fields merged into every request for this profile. |
 | `models` | No | GPT-5 default | Models shown under this profile. |
 
-Model fields:
+## Model Fields
 
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -131,22 +125,22 @@ Model fields:
 | `providerId` | No | `<profile id>/<model id>` | Unique VS Code/Copilot model id. Set this when one profile exposes the same `id` more than once. |
 | `apiModel` | No | `id` | Actual model value sent to the Responses API request. |
 | `name` | No | `id` | Base display name. Used as `${modelName}` in `modelNameTemplate`. |
-| `baseUrl` | No | profile `baseUrl` | Per-model base URL or full Responses API URL override. Uses the same profile key and headers. |
+| `baseUrl` | No | profile `baseUrl` | Per-model base URL or full Responses API URL override. Uses the same automatic `/v1/responses` rule, profile key, and headers. |
 | `family` | No | `id` | Model family advertised to VS Code. |
 | `version` | No | `1` | Model version advertised to VS Code. |
 | `maxInputTokens` | No | `128000` | Input token budget advertised to VS Code. |
 | `maxOutputTokens` | No | `16384` | Output token budget advertised and sent as `max_output_tokens`. |
 | `toolCalling` | No | `false` | Advertise tool support and forward VS Code tools to the Responses API request. |
 | `vision` | No | `false` | Advertise image input support. Image data is sent as Responses API `input_image`. |
-| `reasoningEffort` | No | global default | Sent as `reasoning.effort`. Values: `minimal`, `low`, `medium`, `high`. |
+| `reasoningEffort` | No | global default | Sent as `reasoning.effort`. Values: `minimal`, `low`, `medium`, `high`, `xhigh`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
 | `zeroDataRetentionEnabled` | No | `false` | Matches VS Code Custom Endpoint naming. When `true`, `previous_response_id` is not sent. |
-| `supportedEndpoints` | No | `["/responses"]` | Matches VS Code Custom Endpoint endpoint metadata. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
+| `supportedEndpoints` | No | `["/responses"]` | Matches VS Code Custom Endpoint endpoint metadata. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
 | `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
 
-Global fields:
+## Global Settings
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -161,33 +155,17 @@ Global fields:
 | `copilotCustomProvider.logRequests` | `false` | Legacy metadata logging switch. Prefer `logLevel`. |
 | `copilotCustomProvider.requestBodyOverrides` | `{}` | JSON fields merged into every request. |
 
-`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${baseUrlHost}`. Copilot reliably shows the model name and tooltip; the tooltip is kept to a single line and only shows API key status when a required key is missing.
+`modelNameTemplate` supports `${profileId}`, `${profileName}`, `${modelId}`, `${modelName}`, `${apiModel}`, `${reasoningEffort}`, and `${baseUrlHost}`.
 
-For request debugging, set:
+## Model Names and IDs
 
-```json
-{
-  "copilotCustomProvider.logLevel": "debug"
-}
-```
-
-Debug logs are written to the `Custom OpenAI Responses` output channel. API key headers are redacted, but request bodies can contain prompt and workspace content.
-
-Request body merge order:
+By default, model names are shown as:
 
 ```text
-provider defaults -> global requestBodyOverrides -> profile requestBodyOverrides -> model extraBody -> modelOptions
+Host A/GPT-5.5
 ```
 
-`patch.dropTruncation` is a compatibility switch. Some third-party relay APIs do not correctly process Copilot's `truncation: "disabled"` field in Responses API requests. If debugging shows that this field causes the relay to reject or mishandle requests, set `patch.dropTruncation` to `true` for that model.
-
-By default, this extension uses HTTP/SSE for Responses requests. To match VS Code's non-WebSocket Custom Endpoint path, HTTP/SSE requests do not send `previous_response_id`; the full available message history is sent instead.
-
-To use the official-style Responses WebSocket v2 path, declare `ws:/responses` in the model's `supportedEndpoints`. This mirrors VS Code's Custom Endpoint metadata: the setting is the capability declaration, and the extension automatically chooses WebSocket for that model. It does not probe or infer WebSocket support from the URL.
-
-When WebSocket is selected, the extension converts the Responses URL from `https://.../v1/responses` to `wss://.../v1/responses`, sends `response.create` messages without the HTTP `stream` field, and reuses the returned `response.id` as `previous_response_id` on later turns in the same active chat connection. If `zeroDataRetentionEnabled` is `true`, `previous_response_id` is still suppressed.
-
-## Model IDs
+This keeps models from different profiles distinguishable inside the single `Custom OpenAI Responses` provider group.
 
 VS Code model ids must be unique inside this provider. Upstream model ids do not have to be unique.
 
@@ -211,6 +189,38 @@ Third-party VS Code language model providers do not get Copilot's native Thinkin
 
 To give users a picker-level choice, expose multiple entries with the same upstream `id` and different `providerId` values, such as `gpt-5-low`, `gpt-5-medium`, and `gpt-5-high`.
 
-## Forwarding
+## Relay Compatibility
 
-Requests are sent with the VS Code extension runtime's built-in `fetch`, with `AbortController` for timeout and cancellation. No third-party HTTP client is used.
+`patch.dropTruncation` is a compatibility switch. Some third-party relay APIs do not correctly process Copilot's `truncation: "disabled"` field in Responses API requests. If debugging shows that this field causes the relay to reject or mishandle requests, set `patch.dropTruncation` to `true` for that model.
+
+## Endpoint Modes
+
+By default, this extension uses HTTP/SSE for Responses requests:
+
+```json
+{
+  "supportedEndpoints": ["/responses"]
+}
+```
+
+To use Responses WebSocket v2 for a model, declare:
+
+```json
+{
+  "supportedEndpoints": ["/responses", "ws:/responses"]
+}
+```
+
+Only add `ws:/responses` when your service explicitly supports the Responses WebSocket API. The setting is a capability declaration; the extension does not probe or guess WebSocket support from the URL.
+
+## Debug Logs
+
+For request debugging, set:
+
+```json
+{
+  "copilotCustomProvider.logLevel": "debug"
+}
+```
+
+Debug logs are written to the `Custom OpenAI Responses` output channel. API key headers are redacted, but request bodies can contain prompt and workspace content.
