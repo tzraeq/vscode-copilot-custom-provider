@@ -4,6 +4,7 @@ const vendor = 'custom-openai-responses';
 const configSection = 'copilotCustomProvider';
 const secretPrefix = 'copilotCustomProvider.apiKey.';
 const statefulMarkerMimeType = 'stateful_marker';
+const usageMimeType = 'usage';
 const responsesEndpoint = '/responses';
 const webSocketResponsesEndpoint = 'ws:/responses';
 
@@ -172,6 +173,21 @@ interface ResponsesStreamEvent {
 	output_index?: number;
 	content_index?: number;
 	[key: string]: unknown;
+}
+
+interface APIUsage {
+	prompt_tokens: number;
+	completion_tokens: number;
+	total_tokens: number;
+	prompt_tokens_details?: {
+		cached_tokens: number;
+		cache_creation_input_tokens?: number;
+	};
+	completion_tokens_details?: {
+		reasoning_tokens: number;
+		accepted_prediction_tokens: number;
+		rejected_prediction_tokens: number;
+	};
 }
 
 interface ResponsesRequestStateOptions {
@@ -426,7 +442,7 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 	}
 
 	public async provideTokenCount(
-		_model: CustomLanguageModel,
+		model: CustomLanguageModel,
 		text: string | vscode.LanguageModelChatRequestMessage,
 		token: vscode.CancellationToken
 	): Promise<number> {
@@ -436,7 +452,14 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 
 		const config = await readConfig(this.context);
 		const charsPerToken = Math.max(1, config.tokenEstimateCharsPerToken);
-		return Math.ceil(extractTextForTokenCount(text).length / charsPerToken);
+		const extractedText = extractTextForTokenCount(text);
+		const tokenCount = Math.ceil(extractedText.length / charsPerToken);
+		if (config.logLevel === 'debug') {
+			this.output.appendLine(
+				`[token-count] model=${model.id} chars=${extractedText.length} charsPerToken=${charsPerToken} tokens=${tokenCount} input=${describeTokenCountInput(text)}`
+			);
+		}
+		return tokenCount;
 	}
 }
 
@@ -960,7 +983,7 @@ function dataPartToResponsesInputItem(part: vscode.LanguageModelDataPart): Respo
 }
 
 function dataPartToResponsesInput(part: vscode.LanguageModelDataPart): ResponsesInputContentPart | undefined {
-	if (part.mimeType === statefulMarkerMimeType || part.mimeType === 'cache_control' || part.mimeType === 'context_management') {
+	if (isInternalDataPartMimeType(part.mimeType)) {
 		return undefined;
 	}
 
@@ -1449,6 +1472,7 @@ function reportResponsesStreamEvent(
 			if (connectionId) {
 				reportStatefulMarker(event.response, modelId, progress, connectionId);
 			}
+			reportUsagePart(event, progress);
 			break;
 		default:
 			break;
@@ -1519,6 +1543,7 @@ function reportNonStreamingResponse(
 	for (const toolCall of extractToolCallsFromResponsesPayload(payload)) {
 		progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
 	}
+	reportUsagePart(payload, progress);
 }
 
 function extractTextFromResponsesPayload(payload: unknown): string[] {
@@ -1568,6 +1593,60 @@ function extractToolCallsFromResponsesPayload(payload: unknown): Array<{ callId:
 	}
 
 	return toolCalls;
+}
+
+function reportUsagePart(
+	source: unknown,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>
+): void {
+	const usage = extractResponsesUsage(source);
+	if (!usage) {
+		return;
+	}
+
+	progress.report(new vscode.LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(usage)), usageMimeType));
+}
+
+function extractResponsesUsage(source: unknown): APIUsage | undefined {
+	const record = asRecord(source);
+	const response = asRecord(record?.response);
+	const usage = asRecord(response?.usage) ?? asRecord(record?.usage);
+	if (!usage) {
+		return undefined;
+	}
+
+	const promptTokens = readUsageNumber(usage, 'input_tokens') ?? readUsageNumber(usage, 'prompt_tokens');
+	const completionTokens = readUsageNumber(usage, 'output_tokens') ?? readUsageNumber(usage, 'completion_tokens');
+	const totalTokens = readUsageNumber(usage, 'total_tokens') ?? (
+		promptTokens !== undefined && completionTokens !== undefined
+			? promptTokens + completionTokens
+			: undefined
+	);
+	if (promptTokens === undefined || completionTokens === undefined || totalTokens === undefined) {
+		return undefined;
+	}
+
+	const inputDetails = asRecord(usage.input_tokens_details) ?? asRecord(usage.prompt_tokens_details);
+	const outputDetails = asRecord(usage.output_tokens_details) ?? asRecord(usage.completion_tokens_details);
+
+	return {
+		prompt_tokens: Math.max(0, promptTokens),
+		completion_tokens: Math.max(0, completionTokens),
+		total_tokens: Math.max(0, totalTokens),
+		prompt_tokens_details: {
+			cached_tokens: Math.max(0, readUsageNumber(inputDetails, 'cached_tokens') ?? 0)
+		},
+		completion_tokens_details: {
+			reasoning_tokens: Math.max(0, readUsageNumber(outputDetails, 'reasoning_tokens') ?? 0),
+			accepted_prediction_tokens: Math.max(0, readUsageNumber(outputDetails, 'accepted_prediction_tokens') ?? 0),
+			rejected_prediction_tokens: Math.max(0, readUsageNumber(outputDetails, 'rejected_prediction_tokens') ?? 0)
+		}
+	};
+}
+
+function readUsageNumber(record: Record<string, unknown> | undefined, key: string): number | undefined {
+	const value = record?.[key];
+	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function isResponsesTerminalEvent(event: ResponsesStreamEvent): boolean {
@@ -1630,7 +1709,11 @@ function extractTextForTokenCount(text: string | vscode.LanguageModelChatRequest
 		return text;
 	}
 
-	return text.content.map(contentPartToText).join('\n');
+	return [
+		roleNameForTokenCount(text.role),
+		text.name ?? '',
+		...text.content.map(contentPartToText)
+	].filter((part) => part.length > 0).join('\n');
 }
 
 function contentPartToText(part: vscode.LanguageModelInputPart | unknown): string {
@@ -1639,6 +1722,9 @@ function contentPartToText(part: vscode.LanguageModelInputPart | unknown): strin
 	}
 
 	if (part instanceof vscode.LanguageModelDataPart) {
+		if (isInternalDataPartMimeType(part.mimeType)) {
+			return '';
+		}
 		return decodeDataPart(part);
 	}
 
@@ -1650,15 +1736,97 @@ function contentPartToText(part: vscode.LanguageModelInputPart | unknown): strin
 		return JSON.stringify({ tool_result: part.callId, content: part.content.map(contentPartToText) });
 	}
 
+	const partRecord = asRecord(part);
+	if (partRecord) {
+		const valueText = textLikeValueToString(partRecord.value);
+		if (valueText) {
+			return valueText;
+		}
+		const text = stringValue(partRecord.text) ?? stringValue(partRecord.content);
+		if (text) {
+			return text;
+		}
+		const mimeType = stringValue(partRecord.mimeType);
+		const data = partRecord.data;
+		if (mimeType && data instanceof Uint8Array) {
+			return decodeDataBytes(data, mimeType);
+		}
+	}
+
 	return stringifyUnknown(part);
 }
 
 function decodeDataPart(part: vscode.LanguageModelDataPart): string {
-	if (part.mimeType.startsWith('text/') || part.mimeType === 'application/json') {
-		return new TextDecoder().decode(part.data);
+	return decodeDataBytes(part.data, part.mimeType);
+}
+
+function isInternalDataPartMimeType(mimeType: string): boolean {
+	return mimeType === statefulMarkerMimeType
+		|| mimeType === usageMimeType
+		|| mimeType === 'cache_control'
+		|| mimeType === 'context_management';
+}
+
+function decodeDataBytes(data: Uint8Array, mimeType: string): string {
+	if (mimeType.startsWith('text/') || mimeType === 'application/json') {
+		return new TextDecoder().decode(data);
 	}
 
-	return `[${part.mimeType} data, ${part.data.byteLength} bytes]`;
+	return `[${mimeType} data, ${data.byteLength} bytes]`;
+}
+
+function textLikeValueToString(value: unknown): string | undefined {
+	if (typeof value === 'string') {
+		return value;
+	}
+	if (Array.isArray(value)) {
+		const parts = value.map(textLikeValueToString).filter(isDefined);
+		return parts.length > 0 ? parts.join('\n') : undefined;
+	}
+	return undefined;
+}
+
+function roleNameForTokenCount(role: vscode.LanguageModelChatMessageRole): string {
+	switch (role) {
+		case vscode.LanguageModelChatMessageRole.User:
+			return 'user';
+		case vscode.LanguageModelChatMessageRole.Assistant:
+			return 'assistant';
+		default:
+			return isSystemMessageRole(role) ? 'system' : `role:${role}`;
+	}
+}
+
+function describeTokenCountInput(text: string | vscode.LanguageModelChatRequestMessage): string {
+	if (typeof text === 'string') {
+		return `string(${text.length})`;
+	}
+
+	return `message(role=${roleNameForTokenCount(text.role)}, parts=${text.content.map(describeTokenCountPart).join(',')})`;
+}
+
+function describeTokenCountPart(part: vscode.LanguageModelInputPart | unknown): string {
+	if (part instanceof vscode.LanguageModelTextPart) {
+		return `text(${part.value.length})`;
+	}
+	if (part instanceof vscode.LanguageModelDataPart) {
+		return `data(${part.mimeType},${part.data.byteLength})`;
+	}
+	if (part instanceof vscode.LanguageModelToolCallPart) {
+		return `toolCall(${part.name})`;
+	}
+	if (part instanceof vscode.LanguageModelToolResultPart) {
+		return `toolResult(${part.callId},${part.content.length})`;
+	}
+
+	const partRecord = asRecord(part);
+	if (partRecord) {
+		const constructorName = stringValue((part as { constructor?: { name?: unknown } }).constructor?.name);
+		const type = stringValue(partRecord.type) ?? stringValue(partRecord.mimeType) ?? constructorName ?? 'object';
+		return type;
+	}
+
+	return typeof part;
 }
 
 async function pickProfile(
