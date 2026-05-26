@@ -9,6 +9,9 @@ const reasoningMimeType = 'reasoning';
 const contextManagementMimeType = 'context_management';
 const responsesEndpoint = '/responses';
 const webSocketResponsesEndpoint = 'ws:/responses';
+const contextManagementCompactionType = 'compaction';
+const toolSearchReservedName = 'tool_search';
+const modelsWithoutResponsesContextManagement = new Set(['gpt-5', 'gpt-5.1', 'gpt-5.2']);
 
 type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 type LogLevel = 'off' | 'info' | 'debug';
@@ -93,6 +96,7 @@ interface ResponsesRequestBody {
 	truncation?: 'auto' | 'disabled';
 	include?: string[];
 	top_logprobs?: number;
+	context_management?: ResponsesContextManagementRequest[];
 	reasoning?: {
 		effort: ReasoningEffort;
 	};
@@ -160,6 +164,11 @@ interface ResponsesContextManagementItem {
 	encrypted_content: string;
 }
 
+interface ResponsesContextManagementRequest {
+	type: 'compaction';
+	compact_threshold: number;
+}
+
 interface ResponsesTool {
 	type: 'function';
 	name: string;
@@ -182,6 +191,10 @@ interface ResponsesStreamProcessorContext {
 	output: vscode.OutputChannel;
 	requestId: string;
 	logLevel: LogLevel;
+}
+
+interface ResponsesStreamReportState {
+	lastTextDeltaOutputIndex?: number;
 }
 
 interface ResponsesHttpRequestOptions {
@@ -1026,6 +1039,10 @@ function buildResponsesRequestBody(
 		include: ['reasoning.encrypted_content'],
 		reasoning: { effort }
 	};
+	const contextManagement = toResponsesContextManagement(modelConfig, model.maxInputTokens);
+	if (contextManagement) {
+		body.context_management = [contextManagement];
+	}
 
 	const temperature = readNestedNumber(modelOptions, ['temperature']) ?? modelConfig.temperature;
 	if (typeof temperature === 'number') {
@@ -1042,7 +1059,7 @@ function buildResponsesRequestBody(
 	}
 
 	if (modelConfig.toolCalling && options.tools?.length) {
-		const tools = toResponsesTools(options.tools);
+		const tools = toResponsesTools(options.tools, modelConfig.toolCalling);
 		if (tools.length > 0) {
 			body.tools = tools;
 			if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
@@ -1070,13 +1087,46 @@ function buildResponsesRequestBody(
 	});
 }
 
+function toResponsesContextManagement(
+	modelConfig: ModelConfig,
+	modelMaxInputTokens: number | undefined
+): ResponsesContextManagementRequest | undefined {
+	const family = (modelConfig.family || modelConfig.id).toLowerCase();
+	if (modelsWithoutResponsesContextManagement.has(family)) {
+		return undefined;
+	}
+
+	const maxInputTokens = normalizePositiveNumber(modelConfig.maxInputTokens, modelMaxInputTokens || 0);
+	const compactThreshold = maxInputTokens > 0 ? Math.floor(maxInputTokens * 0.9) : 50000;
+	return {
+		type: contextManagementCompactionType,
+		compact_threshold: compactThreshold
+	};
+}
+
 function toResponsesInput(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	modelIds: readonly string[],
 	stateOptions: ResponsesRequestStateOptions
 ): { input: ResponsesInputItem[]; previous_response_id?: string } {
 	const statefulMarker = getRequestStatefulMarker(messages, modelIds, stateOptions);
-	const inputMessages = statefulMarker ? messages.slice(statefulMarker.index + 1) : messages;
+	const latestCompactionMessageIndex = getLatestCompactionMessageIndex(messages);
+	const latestCompactionMessage = latestCompactionMessageIndex !== undefined
+		? createCompactionRoundTripMessage(messages[latestCompactionMessageIndex])
+		: undefined;
+	let inputMessages: readonly vscode.LanguageModelChatRequestMessage[] = messages;
+	if (statefulMarker) {
+		inputMessages = messages.slice(statefulMarker.index + 1);
+		if (latestCompactionMessageIndex !== undefined) {
+			if (latestCompactionMessageIndex > statefulMarker.index) {
+				inputMessages = inputMessages.slice(latestCompactionMessageIndex - (statefulMarker.index + 1));
+			} else if (latestCompactionMessage) {
+				inputMessages = [latestCompactionMessage, ...inputMessages];
+			}
+		}
+	} else if (latestCompactionMessageIndex !== undefined) {
+		inputMessages = messages.slice(latestCompactionMessageIndex);
+	}
 	const input: ResponsesInputItem[] = [];
 
 	for (const message of inputMessages) {
@@ -1107,6 +1157,44 @@ function getRequestStatefulMarker(
 	}
 
 	return getStatefulMarkerAndIndex(messages, modelIds);
+}
+
+function getLatestCompactionMessageIndex(
+	messages: readonly vscode.LanguageModelChatRequestMessage[]
+): number | undefined {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		if (getCompactionDataParts(messages[index]).length > 0) {
+			return index;
+		}
+	}
+	return undefined;
+}
+
+function createCompactionRoundTripMessage(
+	message: vscode.LanguageModelChatRequestMessage
+): vscode.LanguageModelChatRequestMessage | undefined {
+	if (message.role !== vscode.LanguageModelChatMessageRole.Assistant) {
+		return undefined;
+	}
+
+	const content = getCompactionDataParts(message);
+	return content.length > 0
+		? { role: vscode.LanguageModelChatMessageRole.Assistant, content, name: message.name }
+		: undefined;
+}
+
+function getCompactionDataParts(
+	message: vscode.LanguageModelChatRequestMessage
+): vscode.LanguageModelDataPart[] {
+	if (message.role !== vscode.LanguageModelChatMessageRole.Assistant) {
+		return [];
+	}
+
+	return message.content.filter((part): part is vscode.LanguageModelDataPart =>
+		part instanceof vscode.LanguageModelDataPart
+		&& part.mimeType === contextManagementMimeType
+		&& decodeContextManagementDataPart(part) !== undefined
+	);
 }
 
 function toResponsesInputItems(message: vscode.LanguageModelChatRequestMessage): ResponsesInputItem[] {
@@ -1306,16 +1394,20 @@ function toolResultText(part: vscode.LanguageModelToolResultPart): string {
 		.join('');
 }
 
-function toResponsesTools(tools: readonly vscode.LanguageModelChatTool[]): ResponsesTool[] {
-	return tools
-		.filter((tool) => tool.name.length > 0)
-		.map((tool) => ({
+function toResponsesTools(tools: readonly vscode.LanguageModelChatTool[], toolCalling: boolean | number): ResponsesTool[] {
+	const maxTools = typeof toolCalling === 'number' && Number.isFinite(toolCalling)
+		? Math.max(0, Math.floor(toolCalling))
+		: undefined;
+	const converted = tools
+		.filter((tool) => tool.name.length > 0 && tool.name !== toolSearchReservedName)
+		.map((tool): ResponsesTool => ({
 			type: 'function',
 			name: tool.name,
 			description: tool.description,
 			parameters: normalizeToolParameters(tool.inputSchema),
 			strict: false
 		}));
+	return maxTools === undefined ? converted : converted.slice(0, maxTools);
 }
 
 function normalizeToolParameters(parameters: object | undefined): object {
@@ -1700,6 +1792,7 @@ async function readResponsesStream(
 class ResponsesStreamProcessor {
 	private readonly toolCalls = new Map<number, { callId?: string; name?: string; arguments: string }>();
 	private readonly reportedToolCalls = new Set<string>();
+	private readonly reportState: ResponsesStreamReportState = {};
 	private readonly outputItems: unknown[] = [];
 	private createdResponse: unknown;
 	private terminalReceived = false;
@@ -1769,7 +1862,7 @@ class ResponsesStreamProcessor {
 			this.outputItems.push(event.item);
 		}
 
-		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.reportedToolCalls, this.modelId, this.statefulMarker, this.context);
+		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.reportedToolCalls, this.reportState, this.modelId, this.statefulMarker, this.context);
 
 		if (!isResponsesTerminalEvent(event)) {
 			return;
@@ -2205,6 +2298,7 @@ function reportResponsesStreamEvent(
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
 	reportedToolCalls: Set<string>,
+	reportState: ResponsesStreamReportState,
 	modelId: string,
 	statefulMarker: ResponsesStatefulMarkerReportOptions,
 	context?: ResponsesStreamProcessorContext
@@ -2213,6 +2307,14 @@ function reportResponsesStreamEvent(
 		case 'response.output_text.delta':
 		case 'response.refusal.delta':
 			if (typeof event.delta === 'string' && event.delta.length > 0) {
+				if (typeof event.output_index === 'number'
+					&& reportState.lastTextDeltaOutputIndex !== undefined
+					&& reportState.lastTextDeltaOutputIndex !== event.output_index) {
+					progress.report(new vscode.LanguageModelTextPart('\n\n'));
+				}
+				if (typeof event.output_index === 'number') {
+					reportState.lastTextDeltaOutputIndex = event.output_index;
+				}
 				progress.report(new vscode.LanguageModelTextPart(event.delta));
 			}
 			break;
@@ -2428,7 +2530,7 @@ function extractTextFromResponsesPayload(payload: unknown): string[] {
 		const content = Array.isArray(itemRecord?.content) ? itemRecord.content : [];
 		for (const contentPart of content) {
 			const contentRecord = asRecord(contentPart);
-			const text = stringValue(contentRecord?.text);
+			const text = stringValue(contentRecord?.text) ?? stringValue(contentRecord?.refusal);
 			if (text) {
 				texts.push(text);
 			}
@@ -2969,13 +3071,13 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 			maxInputTokens: 128000,
 			maxOutputTokens: 16384,
 			toolCalling: true,
-				vision: true,
-				reasoningEffort: 'medium',
-				zeroDataRetentionEnabled: false,
-				supportedEndpoints: [responsesEndpoint],
-				patch: {
-					dropTruncation: false
-				}
+			vision: true,
+			reasoningEffort: 'medium',
+			zeroDataRetentionEnabled: false,
+			supportedEndpoints: [responsesEndpoint],
+			patch: {
+				dropTruncation: false
+			}
 		}];
 	}
 
@@ -3182,6 +3284,14 @@ function applyResponsesRequestCompatibility(
 		patch: ModelPatchConfig | undefined;
 	}
 ): ResponsesRequestBody {
+	delete body.n;
+	delete body.stream_options;
+	if (Array.isArray(body.tools) && body.tools.length === 0) {
+		delete body.tools;
+	}
+	if (!body.tools) {
+		delete body.tool_choice;
+	}
 	if (options.zeroDataRetentionEnabled) {
 		body.store = false;
 	}
