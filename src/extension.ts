@@ -5,6 +5,8 @@ const configSection = 'copilotCustomProvider';
 const secretPrefix = 'copilotCustomProvider.apiKey.';
 const statefulMarkerMimeType = 'stateful_marker';
 const usageMimeType = 'usage';
+const reasoningMimeType = 'reasoning';
+const contextManagementMimeType = 'context_management';
 const responsesEndpoint = '/responses';
 const webSocketResponsesEndpoint = 'ws:/responses';
 
@@ -117,8 +119,9 @@ interface ResponsesInputMessage {
 interface ResponsesOutputMessage {
 	type: 'message';
 	role: 'assistant';
-	id: string;
-	status: 'completed';
+	id?: string;
+	status?: 'completed';
+	phase?: string;
 	content: ResponsesOutputContentPart[];
 }
 
@@ -128,7 +131,7 @@ type ResponsesInputContentPart =
 	| { type: 'input_file'; filename: string; file_data: string };
 
 type ResponsesOutputContentPart =
-	| { type: 'output_text'; text: string; annotations: unknown[] }
+	| { type: 'output_text'; text: string; annotations?: unknown[] }
 	| { type: 'refusal'; refusal: string };
 
 interface ResponsesFunctionCall {
@@ -185,6 +188,7 @@ interface ResponsesHttpRequestOptions {
 	requestId: string;
 	ignoreStatefulMarker: boolean;
 	allowPreviousResponseId: boolean;
+	retryOnInvalidStatefulMarker?: boolean;
 }
 
 interface APIUsage {
@@ -206,6 +210,16 @@ interface ResponsesRequestStateOptions {
 	ignoreStatefulMarker: boolean;
 	webSocketStatefulMarker?: string;
 	allowPreviousResponseId: boolean;
+}
+
+interface ResponsesStatefulMarkerReportOptions {
+	enabled: boolean;
+	connectionId?: string;
+}
+
+interface ResponsesTerminalOutcome {
+	ok: boolean;
+	message?: string;
 }
 
 interface StatefulMarkerData {
@@ -416,8 +430,9 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			headers,
 			{
 				requestId,
-				ignoreStatefulMarker: true,
-				allowPreviousResponseId: false
+				ignoreStatefulMarker: Boolean(model.config.model.zeroDataRetentionEnabled),
+				allowPreviousResponseId: !model.config.model.zeroDataRetentionEnabled,
+				retryOnInvalidStatefulMarker: true
 			}
 		);
 	}
@@ -438,6 +453,55 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			ignoreStatefulMarker: requestOptions.ignoreStatefulMarker,
 			allowPreviousResponseId: requestOptions.allowPreviousResponseId
 		});
+		try {
+			await this.sendHttpResponsesRequest(
+				model,
+				profile,
+				progress,
+				token,
+				config,
+				requestUrl,
+				headers,
+				requestOptions,
+				body
+			);
+		} catch (error) {
+			if (!requestOptions.retryOnInvalidStatefulMarker || !body.previous_response_id || !isInvalidStatefulMarkerError(error)) {
+				throw error;
+			}
+			if (shouldLogInfo(config.logLevel)) {
+				this.output.appendLine(`[${requestOptions.requestId}] retrying HTTP request without previous_response_id`);
+			}
+			await this.provideHttpResponsesChatResponse(
+				model,
+				profile,
+				messages,
+				options,
+				progress,
+				token,
+				config,
+				requestUrl,
+				headers,
+				{
+					requestId: `${requestOptions.requestId}:retry`,
+					ignoreStatefulMarker: true,
+					allowPreviousResponseId: false
+				}
+			);
+		}
+	}
+
+	private async sendHttpResponsesRequest(
+		model: CustomLanguageModel,
+		profile: ProviderProfileConfig,
+		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+		token: vscode.CancellationToken,
+		config: ExtensionConfig,
+		requestUrl: string,
+		headers: Record<string, string>,
+		requestOptions: ResponsesHttpRequestOptions,
+		body: ResponsesRequestBody
+	): Promise<void> {
 		const requestBody = JSON.stringify(body);
 
 		if (shouldLogInfo(config.logLevel)) {
@@ -463,16 +527,16 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(await formatHttpError(response));
 		}
 
+		const markerOptions = toStatefulMarkerReportOptions(model, requestOptions);
 		if (body.stream) {
-			await readResponsesStream(response, progress, token, model.config.providerModelId, {
+			await readResponsesStream(response, progress, token, model.config.providerModelId, markerOptions, {
 				output: this.output,
 				requestId: requestOptions.requestId,
 				logLevel: config.logLevel
 			});
 		} else {
 			const payload = await response.json() as unknown;
-			throwIfResponsesPayloadTerminalError(payload);
-			reportNonStreamingResponse(payload, progress, model.config.providerModelId);
+			reportNonStreamingResponse(payload, progress, model.config.providerModelId, markerOptions);
 		}
 
 		if (shouldLogInfo(config.logLevel)) {
@@ -957,7 +1021,7 @@ function buildResponsesRequestBody(
 		...toResponsesInput(messages, [model.config.providerModelId, apiModel], stateOptions),
 		stream: config.enableStreaming,
 		max_output_tokens: maxOutputTokens,
-		store: false,
+		store: !modelConfig.zeroDataRetentionEnabled,
 		truncation: 'disabled',
 		include: ['reasoning.encrypted_content'],
 		reasoning: { effort }
@@ -978,13 +1042,16 @@ function buildResponsesRequestBody(
 	}
 
 	if (modelConfig.toolCalling && options.tools?.length) {
-		body.tools = options.tools.map(toResponsesTool);
-		if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
-			body.tool_choice = options.tools.length === 1
-				? { type: 'function', name: options.tools[0].name }
-				: 'required';
-		} else {
-			body.tool_choice = 'auto';
+		const tools = toResponsesTools(options.tools);
+		if (tools.length > 0) {
+			body.tools = tools;
+			if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
+				body.tool_choice = tools.length === 1
+					? { type: 'function', name: tools[0].name }
+					: 'required';
+			} else {
+				body.tool_choice = 'auto';
+			}
 		}
 	}
 
@@ -1055,8 +1122,6 @@ function toResponsesInputItems(message: vscode.LanguageModelChatRequestMessage):
 			items.push({
 				type: 'message',
 				role: 'assistant',
-				id: 'msg_123',
-				status: 'completed',
 				content: outputContent
 			});
 		}
@@ -1152,16 +1217,24 @@ function toResponsesRoundTripItem(part: vscode.LanguageModelInputPart | unknown)
 
 function toResponsesOutputContentPart(part: vscode.LanguageModelInputPart | unknown): ResponsesOutputContentPart | undefined {
 	if (part instanceof vscode.LanguageModelTextPart && part.value.trim()) {
-		return { type: 'output_text', text: part.value, annotations: [] };
+		return { type: 'output_text', text: part.value };
 	}
 	return undefined;
 }
 
 function dataPartToResponsesInputItem(part: vscode.LanguageModelDataPart): ResponsesInputItem | undefined {
-	if (part.mimeType !== 'context_management') {
-		return undefined;
+	if (part.mimeType === contextManagementMimeType) {
+		return decodeContextManagementDataPart(part);
 	}
 
+	if (part.mimeType === reasoningMimeType) {
+		return decodeReasoningDataPart(part);
+	}
+
+	return undefined;
+}
+
+function decodeContextManagementDataPart(part: vscode.LanguageModelDataPart): ResponsesContextManagementItem | undefined {
 	const value = safeJsonParse(decodeDataPart(part));
 	const record = asRecord(value);
 	if (record?.type !== 'compaction') {
@@ -1177,6 +1250,27 @@ function dataPartToResponsesInputItem(part: vscode.LanguageModelDataPart): Respo
 	return {
 		type: 'compaction',
 		id,
+		encrypted_content: encryptedContent
+	};
+}
+
+function decodeReasoningDataPart(part: vscode.LanguageModelDataPart): ResponsesReasoningItem | undefined {
+	const value = safeJsonParse(decodeDataPart(part));
+	const record = asRecord(value);
+	if (record?.type !== 'reasoning') {
+		return undefined;
+	}
+
+	const id = stringValue(record.id);
+	const encryptedContent = stringValue(record.encrypted_content);
+	if (!id || !encryptedContent) {
+		return undefined;
+	}
+
+	return {
+		type: 'reasoning',
+		id,
+		summary: [],
 		encrypted_content: encryptedContent
 	};
 }
@@ -1212,20 +1306,29 @@ function toolResultText(part: vscode.LanguageModelToolResultPart): string {
 		.join('');
 }
 
-function toResponsesTool(tool: vscode.LanguageModelChatTool): ResponsesTool {
-	return {
-		type: 'function',
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-		strict: false
-	};
+function toResponsesTools(tools: readonly vscode.LanguageModelChatTool[]): ResponsesTool[] {
+	return tools
+		.filter((tool) => tool.name.length > 0)
+		.map((tool) => ({
+			type: 'function',
+			name: tool.name,
+			description: tool.description,
+			parameters: normalizeToolParameters(tool.inputSchema),
+			strict: false
+		}));
+}
+
+function normalizeToolParameters(parameters: object | undefined): object {
+	if (!parameters || !isRecord(parameters)) {
+		return {};
+	}
+	return parameters;
 }
 
 function buildHeaders(profile: ProviderProfileConfig): Record<string, string> {
 	const headers: Record<string, string> = {
 		'content-type': 'application/json',
-		...profile.extraHeaders
+		...sanitizeExtraHeaders(profile.extraHeaders)
 	};
 
 	if (profile.apiKey) {
@@ -1233,6 +1336,101 @@ function buildHeaders(profile: ProviderProfileConfig): Record<string, string> {
 	}
 
 	return headers;
+}
+
+const reservedExtraHeaderNames = new Set([
+	'accept-charset',
+	'accept-encoding',
+	'access-control-request-headers',
+	'access-control-request-method',
+	'authorization',
+	'connection',
+	'content-length',
+	'content-type',
+	'cookie',
+	'date',
+	'dnt',
+	'expect',
+	'forwarded',
+	'host',
+	'keep-alive',
+	'origin',
+	'permissions-policy',
+	'referer',
+	'te',
+	'trailer',
+	'transfer-encoding',
+	'upgrade',
+	'user-agent',
+	'via',
+	'x-forwarded-for',
+	'x-forwarded-host',
+	'x-forwarded-proto'
+]);
+
+const validHeaderNamePattern = /^[!#$%&'*+\-.0-9A-Z^_`a-z|~]+$/;
+
+function sanitizeExtraHeaders(headers: Record<string, string>): Record<string, string> {
+	const sanitized: Record<string, string> = {};
+	let count = 0;
+
+	for (const [rawName, rawValue] of Object.entries(headers)) {
+		if (count >= 20) {
+			break;
+		}
+
+		const name = rawName.trim();
+		const value = sanitizeHeaderValue(rawValue);
+		if (value === undefined || !isAllowedExtraHeaderName(name, value)) {
+			continue;
+		}
+
+		sanitized[name] = value;
+		count += 1;
+	}
+
+	return sanitized;
+}
+
+function isAllowedExtraHeaderName(name: string, value: string): boolean {
+	if (!name || name.length > 256 || !validHeaderNamePattern.test(name)) {
+		return false;
+	}
+
+	const lower = name.toLowerCase();
+	return !reservedExtraHeaderNames.has(lower)
+		&& lower !== 'api-key'
+		&& lower !== 'openai-api-key'
+		&& lower !== 'x-api-key'
+		&& lower !== 'x-github-api-version'
+		&& lower !== 'x-initiator'
+		&& lower !== 'x-interaction-id'
+		&& lower !== 'x-interaction-type'
+		&& lower !== 'x-onbehalf-extension-id'
+		&& lower !== 'x-request-id'
+		&& lower !== 'x-vscode-user-agent-library-version'
+		&& !lower.startsWith('proxy-')
+		&& !lower.startsWith('sec-')
+		&& !isForbiddenHttpMethodOverrideHeader(lower, value);
+}
+
+function isForbiddenHttpMethodOverrideHeader(lowerName: string, value: string): boolean {
+	if (lowerName !== 'x-http-method' && lowerName !== 'x-http-method-override' && lowerName !== 'x-method-override') {
+		return false;
+	}
+	const method = value.toLowerCase().trim();
+	return method === 'connect' || method === 'trace' || method === 'track';
+}
+
+function sanitizeHeaderValue(value: string): string | undefined {
+	const trimmed = value.trim();
+	if (trimmed.length > 8192) {
+		return undefined;
+	}
+	if (/[\x00-\x1F\x7F]/.test(trimmed) || /[\u200B-\u200D\u202A-\u202E\uFEFF]/.test(trimmed)) {
+		return undefined;
+	}
+	return trimmed;
 }
 
 interface FetchOptions {
@@ -1423,6 +1621,7 @@ async function readResponsesStream(
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 	token: vscode.CancellationToken,
 	modelId: string,
+	statefulMarker: ResponsesStatefulMarkerReportOptions,
 	context?: ResponsesStreamProcessorContext
 ): Promise<void> {
 	if (!response.body) {
@@ -1432,7 +1631,7 @@ async function readResponsesStream(
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
-	const processor = new ResponsesStreamProcessor(progress, modelId, undefined, context);
+	const processor = new ResponsesStreamProcessor(progress, modelId, statefulMarker, context);
 	const cancellation = token.onCancellationRequested(() => {
 		void reader.cancel(new vscode.CancellationError()).catch(() => undefined);
 	});
@@ -1513,7 +1712,7 @@ class ResponsesStreamProcessor {
 	public constructor(
 		private readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		private readonly modelId: string,
-		private readonly connectionId?: string,
+		private readonly statefulMarker: ResponsesStatefulMarkerReportOptions,
 		private readonly context?: ResponsesStreamProcessorContext
 	) {}
 
@@ -1570,17 +1769,26 @@ class ResponsesStreamProcessor {
 			this.outputItems.push(event.item);
 		}
 
-		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.reportedToolCalls, this.modelId, this.connectionId, this.context);
+		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.reportedToolCalls, this.modelId, this.statefulMarker, this.context);
 
 		if (!isResponsesTerminalEvent(event)) {
 			return;
 		}
 
 		this.terminalReceived = true;
-		if (event.type !== 'response.completed') {
-			throw new Error(formatResponsesTerminalEvent(event));
-		}
 		this.completedResponse = event.response;
+		const outcome = handleResponsesTerminalEvent(
+			event,
+			this.progress,
+			this.reportedToolCalls,
+			this.modelId,
+			this.statefulMarker,
+			this.context,
+			!this.textDeltaReported
+		);
+		if (!outcome.ok) {
+			throw new Error(outcome.message ?? formatResponsesTerminalEvent(event));
+		}
 	}
 
 	public finishFromStreamEnd(streamName: string): void {
@@ -1596,7 +1804,7 @@ class ResponsesStreamProcessor {
 			this.progress,
 			this.reportedToolCalls,
 			this.modelId,
-			this.connectionId,
+			this.statefulMarker,
 			!this.textDeltaReported
 		);
 	}
@@ -1923,7 +2131,7 @@ class ResponsesWebSocketActiveRequest {
 		private readonly connectionId: string,
 		private readonly context?: ResponsesStreamProcessorContext
 	) {
-		this.processor = new ResponsesStreamProcessor(progress, modelId, connectionId, context);
+		this.processor = new ResponsesStreamProcessor(progress, modelId, { enabled: true, connectionId }, context);
 		this.done = new Promise<void>((resolve, reject) => {
 			this.resolveDone = resolve;
 			this.rejectDone = reject;
@@ -1998,7 +2206,7 @@ function reportResponsesStreamEvent(
 	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
 	reportedToolCalls: Set<string>,
 	modelId: string,
-	connectionId?: string,
+	statefulMarker: ResponsesStatefulMarkerReportOptions,
 	context?: ResponsesStreamProcessorContext
 ): void {
 	switch (event.type) {
@@ -2020,16 +2228,38 @@ function reportResponsesStreamEvent(
 		case 'response.function_call_arguments.done':
 			rememberToolCallArgumentsDone(event, toolCalls);
 			break;
-		case 'response.completed':
-			reportToolCallsFromCompletedResponse(event, reportedToolCalls, progress, context);
-			if (connectionId) {
-				reportStatefulMarker(event.response, modelId, progress, connectionId);
-			}
-			reportUsagePart(event, progress);
-			break;
 		default:
 			break;
 	}
+}
+
+function handleResponsesTerminalEvent(
+	event: ResponsesStreamEvent,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	reportedToolCalls: Set<string>,
+	modelId: string,
+	statefulMarker: ResponsesStatefulMarkerReportOptions,
+	context?: ResponsesStreamProcessorContext,
+	reportText = true
+): ResponsesTerminalOutcome {
+	const response = event.response;
+	if (event.type === 'response.completed') {
+		reportCompletedResponsePayload(response, progress, reportedToolCalls, modelId, statefulMarker, reportText);
+		return { ok: true };
+	}
+
+	const responseRecord = asRecord(response);
+	const incompleteReason = readNestedString(responseRecord ?? {}, ['incomplete_details', 'reason']);
+	const isMaxOutputIncomplete = event.type === 'response.incomplete' && incompleteReason === 'max_output_tokens';
+	reportCompletedResponsePayload(response, progress, reportedToolCalls, modelId, { enabled: false }, reportText);
+	if (isMaxOutputIncomplete) {
+		return { ok: true };
+	}
+
+	return {
+		ok: false,
+		message: formatResponsesTerminalEvent(event)
+	};
 }
 
 function rememberToolCallStart(
@@ -2112,21 +2342,12 @@ function reportToolCallDone(
 	toolCalls.delete(index);
 }
 
-function reportToolCallsFromCompletedResponse(
-	event: ResponsesStreamEvent,
-	reportedToolCalls: Set<string>,
-	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-	context?: ResponsesStreamProcessorContext
-): void {
-	reportToolCallsFromPayload(event.response, reportedToolCalls, progress, context, 'response.completed');
-}
-
 function reportCompletedResponsePayload(
 	payload: unknown,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 	reportedToolCalls: Set<string>,
 	modelId: string,
-	connectionId?: string,
+	statefulMarker: ResponsesStatefulMarkerReportOptions,
 	reportText = true
 ): void {
 	if (reportText) {
@@ -2135,10 +2356,21 @@ function reportCompletedResponsePayload(
 		}
 	}
 	reportToolCallsFromPayload(payload, reportedToolCalls, progress, undefined, 'completed-payload');
-	if (connectionId) {
-		reportStatefulMarker(payload, modelId, progress, connectionId);
-	}
+	reportRoundTripDataParts(payload, progress);
+	reportResponseStatefulMarker(payload, modelId, progress, statefulMarker);
 	reportUsagePart(payload, progress);
+}
+
+function reportRoundTripDataParts(
+	payload: unknown,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>
+): void {
+	for (const item of extractReasoningItemsFromResponsesPayload(payload)) {
+		progress.report(new vscode.LanguageModelDataPart(encodeInternalDataPart(item), reasoningMimeType));
+	}
+	for (const item of extractContextManagementItemsFromResponsesPayload(payload)) {
+		progress.report(new vscode.LanguageModelDataPart(encodeInternalDataPart(item), contextManagementMimeType));
+	}
 }
 
 function reportToolCallsFromPayload(
@@ -2161,15 +2393,25 @@ function reportToolCallsFromPayload(
 function reportNonStreamingResponse(
 	payload: unknown,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-	modelId: string
+	modelId: string,
+	statefulMarker: ResponsesStatefulMarkerReportOptions
 ): void {
-	for (const text of extractTextFromResponsesPayload(payload)) {
-		progress.report(new vscode.LanguageModelTextPart(text));
+	const terminalEvent = asResponsesTerminalEvent(payload);
+	if (terminalEvent) {
+		const outcome = handleResponsesTerminalEvent(
+			terminalEvent,
+			progress,
+			new Set<string>(),
+			modelId,
+			statefulMarker
+		);
+		if (!outcome.ok) {
+			throw new Error(outcome.message ?? formatResponsesTerminalEvent(terminalEvent));
+		}
+		return;
 	}
-	for (const toolCall of extractToolCallsFromResponsesPayload(payload)) {
-		progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
-	}
-	reportUsagePart(payload, progress);
+
+	reportCompletedResponsePayload(payload, progress, new Set<string>(), modelId, statefulMarker);
 }
 
 function extractTextFromResponsesPayload(payload: unknown): string[] {
@@ -2219,6 +2461,64 @@ function extractToolCallsFromResponsesPayload(payload: unknown): Array<{ callId:
 	}
 
 	return toolCalls;
+}
+
+function extractReasoningItemsFromResponsesPayload(payload: unknown): ResponsesReasoningItem[] {
+	const items: ResponsesReasoningItem[] = [];
+	for (const item of extractResponsesOutputItems(payload)) {
+		const record = asRecord(item);
+		if (record?.type !== 'reasoning') {
+			continue;
+		}
+
+		const id = stringValue(record.id);
+		const encryptedContent = stringValue(record.encrypted_content);
+		if (!id || !encryptedContent) {
+			continue;
+		}
+
+		items.push({
+			type: 'reasoning',
+			id,
+			summary: [],
+			encrypted_content: encryptedContent
+		});
+	}
+	return items;
+}
+
+function extractContextManagementItemsFromResponsesPayload(payload: unknown): ResponsesContextManagementItem[] {
+	const items: ResponsesContextManagementItem[] = [];
+	for (const item of extractResponsesOutputItems(payload)) {
+		const record = asRecord(item);
+		if (record?.type !== 'compaction') {
+			continue;
+		}
+
+		const id = stringValue(record.id);
+		const encryptedContent = stringValue(record.encrypted_content);
+		if (!id || !encryptedContent) {
+			continue;
+		}
+
+		items.push({
+			type: 'compaction',
+			id,
+			encrypted_content: encryptedContent
+		});
+	}
+	return items;
+}
+
+function extractResponsesOutputItems(payload: unknown): unknown[] {
+	const record = asRecord(payload);
+	const response = asRecord(record?.response);
+	const output = response?.output ?? record?.output;
+	return Array.isArray(output) ? output : [];
+}
+
+function encodeInternalDataPart(value: unknown): Uint8Array {
+	return new TextEncoder().encode(JSON.stringify(value));
 }
 
 function reportUsagePart(
@@ -2292,15 +2592,6 @@ function isStreamingProgressEvent(event: ResponsesStreamEvent): boolean {
 
 	return event.type === 'response.output_item.done'
 		&& asRecord(event.item)?.type === 'function_call';
-}
-
-function throwIfResponsesPayloadTerminalError(payload: unknown): void {
-	const eventLike = asResponsesTerminalEvent(payload);
-	if (!eventLike || eventLike.type === 'response.completed') {
-		return;
-	}
-
-	throw new Error(formatResponsesTerminalEvent(eventLike));
 }
 
 function asResponsesTerminalEvent(source: unknown): ResponsesStreamEvent | undefined {
@@ -2520,7 +2811,8 @@ function isInternalDataPartMimeType(mimeType: string): boolean {
 	return mimeType === statefulMarkerMimeType
 		|| mimeType === usageMimeType
 		|| mimeType === 'cache_control'
-		|| mimeType === 'context_management';
+		|| mimeType === contextManagementMimeType
+		|| mimeType === reasoningMimeType;
 }
 
 function decodeDataBytes(data: Uint8Array, mimeType: string): string {
@@ -2836,6 +3128,15 @@ function shouldUseWebSocketResponsesApi(
 		&& Boolean(options.tools?.length);
 }
 
+function toStatefulMarkerReportOptions(
+	model: CustomLanguageModel,
+	requestOptions: ResponsesHttpRequestOptions
+): ResponsesStatefulMarkerReportOptions {
+	return {
+		enabled: requestOptions.allowPreviousResponseId && !model.config.model.zeroDataRetentionEnabled
+	};
+}
+
 function toResponsesWebSocketCreateMessage(body: ResponsesRequestBody): Record<string, unknown> {
 	const { stream: _stream, ...rest } = body;
 	return {
@@ -2881,6 +3182,9 @@ function applyResponsesRequestCompatibility(
 		patch: ModelPatchConfig | undefined;
 	}
 ): ResponsesRequestBody {
+	if (options.zeroDataRetentionEnabled) {
+		body.store = false;
+	}
 	if ('previous_response_id' in body && (
 		!options.allowPreviousResponseId
 		|| options.zeroDataRetentionEnabled
@@ -3040,6 +3344,18 @@ function reportStatefulMarker(
 		return;
 	}
 	progress.report(new vscode.LanguageModelDataPart(encodeStatefulMarker(modelId, responseId, connectionId), statefulMarkerMimeType));
+}
+
+function reportResponseStatefulMarker(
+	response: unknown,
+	modelId: string,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	options: ResponsesStatefulMarkerReportOptions
+): void {
+	if (!options.enabled) {
+		return;
+	}
+	reportStatefulMarker(response, modelId, progress, options.connectionId);
 }
 
 function toLanguageModelThinkingPartLike(part: unknown): LanguageModelThinkingPartLike | undefined {

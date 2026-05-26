@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/tzraeq/vscode-copilot-custom-provider.git"
   },
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "tzraeq",
   "license": "MIT",
   "homepage": "https://github.com/tzraeq/vscode-copilot-custom-provider",
@@ -149,7 +149,7 @@
                     "boolean"
                   ]
                 },
-                "description": "Additional HTTP headers sent for this profile. Values are sent as strings."
+                "description": "Additional HTTP headers sent for this profile. Values are sent as strings. Reserved, unsafe, and auth-related header overrides are ignored."
               },
               "requestBodyOverrides": {
                 "type": "object",
@@ -256,7 +256,7 @@
                     "zeroDataRetentionEnabled": {
                       "type": "boolean",
                       "default": false,
-                      "markdownDescription": "Whether Zero Data Retention (ZDR) is enabled for this endpoint. When `true`, `previous_response_id` will not be sent in Responses API requests."
+                      "markdownDescription": "Whether Zero Data Retention (ZDR) is enabled for this endpoint. When `true`, `previous_response_id` will not be sent and requests use `store: false`."
                     },
                     "supportedEndpoints": {
                       "type": "array",

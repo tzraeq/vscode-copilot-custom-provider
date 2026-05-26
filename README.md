@@ -113,7 +113,7 @@ Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a differen
 | `requireApiKey` | No | `true` | Require a key when using this profile. Models still appear before a key is set. Set `false` for local/proxy endpoints that need no key. |
 | `apiKeyHeader` | No | `Authorization` | Header name used for the key. |
 | `apiKeyPrefix` | No | `Bearer ` | Prefix before the key. Use `""` for raw key headers. |
-| `extraHeaders` | No | `{}` | Extra static headers for this profile. Do not put secrets here. |
+| `extraHeaders` | No | `{}` | Extra static headers for this profile. Reserved, unsafe, and auth-related header overrides are ignored. Do not put secrets here. |
 | `requestBodyOverrides` | No | `{}` | JSON fields merged into every request for this profile. |
 | `models` | No | GPT-5 default | Models shown under this profile. |
 
@@ -135,7 +135,7 @@ Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a differen
 | `reasoningEffort` | No | global default | Sent as `reasoning.effort`. Values: `minimal`, `low`, `medium`, `high`, `xhigh`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
-| `zeroDataRetentionEnabled` | No | `false` | Matches VS Code Custom Endpoint naming. When `true`, `previous_response_id` is not sent. |
+| `zeroDataRetentionEnabled` | No | `false` | Matches VS Code Custom Endpoint naming. When `true`, `previous_response_id` is not sent and requests use `store: false`. |
 | `supportedEndpoints` | No | `["/responses"]` | Matches VS Code Custom Endpoint endpoint metadata. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
 | `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |

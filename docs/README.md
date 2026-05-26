@@ -60,7 +60,7 @@ The extension uses the VS Code extension host runtime's built-in `fetch` for HTT
 
 Timeouts and cancellation are handled with `AbortController`.
 
-For HTTP/SSE, the extension sends the available message history on each request and does not send `previous_response_id`. This matches the practical behavior of VS Code's non-WebSocket Custom Endpoint path and avoids relying on server-side conversation state.
+For HTTP/SSE, non-ZDR models report the returned `response.id` back to VS Code as a state marker and can send `previous_response_id` on later turns when that marker is still present in chat history. If the upstream rejects that marker as invalid, expired, or missing, the extension retries once with full available history and without `previous_response_id`.
 
 ## WebSocket Responses API
 
@@ -82,7 +82,7 @@ When WebSocket is selected:
 - the returned `response.id` is reported back to VS Code as a state marker;
 - later turns on the same active chat connection can reuse that marker as `previous_response_id`.
 
-If `zeroDataRetentionEnabled` is `true`, `previous_response_id` is suppressed even on the WebSocket path.
+If `zeroDataRetentionEnabled` is `true`, `previous_response_id` is suppressed on both HTTP/SSE and WebSocket paths, and the request body sends `store: false`.
 
 If a WebSocket request fails because the upstream rejects `previous_response_id`, the extension retries once without that field.
 
@@ -107,9 +107,12 @@ usage
 stateful_marker
 cache_control
 context_management
+reasoning
 ```
 
 They are also excluded from fallback token estimation. Token counting should reflect user/model-visible input, not provider bookkeeping metadata.
+
+`reasoning` and `context_management` are used to round-trip Responses API encrypted reasoning and compaction items through the public VS Code `LanguageModelDataPart` surface.
 
 Image data parts are different: `image/*` data parts are real model input when the configured model has `vision: true`, so they are converted to Responses API `input_image` content.
 
