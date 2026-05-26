@@ -175,6 +175,18 @@ interface ResponsesStreamEvent {
 	[key: string]: unknown;
 }
 
+interface ResponsesStreamProcessorContext {
+	output: vscode.OutputChannel;
+	requestId: string;
+	logLevel: LogLevel;
+}
+
+interface ResponsesHttpRequestOptions {
+	requestId: string;
+	ignoreStatefulMarker: boolean;
+	allowPreviousResponseId: boolean;
+}
+
 interface APIUsage {
 	prompt_tokens: number;
 	completion_tokens: number;
@@ -200,6 +212,55 @@ interface StatefulMarkerData {
 	modelId: string;
 	marker: string;
 	connectionId?: string;
+}
+
+type FetcherId = 'undici-fetch';
+type FetchPhase = 'requestResponse' | 'responseStreaming';
+type FetchOutcome = 'success' | 'error' | 'cancel';
+
+interface FetchEvent {
+	readonly requestId: string;
+	readonly phase: FetchPhase;
+	readonly outcome: FetchOutcome;
+	readonly fetcher: FetcherId;
+	readonly url: string;
+	readonly status?: number;
+	readonly reason?: unknown;
+	readonly bytesReceived?: number;
+}
+
+class ResponsesApiError extends Error {
+	public readonly code?: string;
+	public readonly errorType?: string;
+	public readonly status?: number;
+
+	public constructor(message: string, options: { code?: string; errorType?: string; status?: number } = {}) {
+		super(message);
+		this.name = 'ResponsesApiError';
+		this.code = options.code;
+		this.errorType = options.errorType;
+		this.status = options.status;
+	}
+}
+
+class ResponsesWebSocketTransportError extends Error {
+	public constructor(message: string, cause?: unknown) {
+		super(message);
+		this.name = 'ResponsesWebSocketTransportError';
+		if (cause !== undefined) {
+			(this as Error & { cause?: unknown }).cause = cause;
+		}
+	}
+}
+
+class ResponsesWebSocketRequestError extends Error {
+	public constructor(message: string, public readonly didStream: boolean, cause?: unknown) {
+		super(message);
+		this.name = 'ResponsesWebSocketRequestError';
+		if (cause !== undefined) {
+			(this as Error & { cause?: unknown }).cause = cause;
+		}
+	}
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -229,6 +290,7 @@ export function deactivate(): void {
 class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<CustomLanguageModel>, vscode.Disposable {
 	private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
 	private readonly webSockets: ResponsesWebSocketManager;
+	private readonly fetcher: CustomFetcherService;
 	private readonly disposables: vscode.Disposable[] = [this.onDidChangeEmitter];
 
 	public readonly onDidChangeLanguageModelChatInformation = this.onDidChangeEmitter.event;
@@ -237,6 +299,7 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 		private readonly context: vscode.ExtensionContext,
 		private readonly output: vscode.OutputChannel
 	) {
+		this.fetcher = new CustomFetcherService(output);
 		this.webSockets = new ResponsesWebSocketManager(output);
 		this.disposables.push(this.webSockets);
 	}
@@ -323,7 +386,7 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 
 		const headers = buildHeaders(profile);
 		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-		const useWebSocket = shouldUseWebSocketResponsesApi(model.config.model);
+		const useWebSocket = shouldUseWebSocketResponsesApi(model.config.model, options);
 
 		if (useWebSocket) {
 			await this.provideWebSocketResponsesChatResponse(
@@ -341,22 +404,53 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			return;
 		}
 
+		await this.provideHttpResponsesChatResponse(
+			model,
+			profile,
+			messages,
+			options,
+			progress,
+			token,
+			config,
+			requestUrl,
+			headers,
+			{
+				requestId,
+				ignoreStatefulMarker: true,
+				allowPreviousResponseId: false
+			}
+		);
+	}
+
+	private async provideHttpResponsesChatResponse(
+		model: CustomLanguageModel,
+		profile: ProviderProfileConfig,
+		messages: readonly vscode.LanguageModelChatRequestMessage[],
+		options: vscode.ProvideLanguageModelChatResponseOptions,
+		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+		token: vscode.CancellationToken,
+		config: ExtensionConfig,
+		requestUrl: string,
+		headers: Record<string, string>,
+		requestOptions: ResponsesHttpRequestOptions
+	): Promise<void> {
 		const body = buildResponsesRequestBody(model, profile, messages, options, config, {
-			ignoreStatefulMarker: true,
-			allowPreviousResponseId: false
+			ignoreStatefulMarker: requestOptions.ignoreStatefulMarker,
+			allowPreviousResponseId: requestOptions.allowPreviousResponseId
 		});
 		const requestBody = JSON.stringify(body);
 
 		if (shouldLogInfo(config.logLevel)) {
 			this.output.appendLine(
-				`[${requestId}] ${body.stream ? 'stream' : 'non-stream'} request profile=${profile.id} model=${body.model} url=${requestUrl}`
+				`[${requestOptions.requestId}] ${body.stream ? 'stream' : 'non-stream'} request profile=${profile.id} model=${body.model} url=${requestUrl}`
 			);
 		}
 		if (config.logLevel === 'debug') {
-			logDebugHttpRequest(this.output, requestId, requestUrl, headers, requestBody);
+			logDebugHttpRequest(this.output, requestOptions.requestId, requestUrl, headers, requestBody);
 		}
 
-		const response = await fetchWithRetry(requestUrl, {
+		const response = await this.fetcher.fetch(requestUrl, {
+			requestId: requestOptions.requestId,
 			method: 'POST',
 			headers,
 			body: requestBody,
@@ -369,15 +463,20 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(await formatHttpError(response));
 		}
 
-	if (body.stream) {
-		await readResponsesStream(response, progress, token, model.config.providerModelId);
-	} else {
-		const payload = await response.json() as unknown;
-		reportNonStreamingResponse(payload, progress, model.config.providerModelId);
+		if (body.stream) {
+			await readResponsesStream(response, progress, token, model.config.providerModelId, {
+				output: this.output,
+				requestId: requestOptions.requestId,
+				logLevel: config.logLevel
+			});
+		} else {
+			const payload = await response.json() as unknown;
+			throwIfResponsesPayloadTerminalError(payload);
+			reportNonStreamingResponse(payload, progress, model.config.providerModelId);
 		}
 
 		if (shouldLogInfo(config.logLevel)) {
-			this.output.appendLine(`[${requestId}] completed status=${response.status}`);
+			this.output.appendLine(`[${requestOptions.requestId}] completed status=${response.status}`);
 		}
 	}
 
@@ -396,6 +495,7 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 		const modelIds = responseStateModelIds(model);
 		const messageMarker = getStatefulMarkerAndIndex(messages, modelIds)?.marker;
 		const connectionId = messageMarker?.connectionId ?? crypto.randomUUID();
+		this.webSockets.maybeResetForConversationRewrite(connectionId, countNonSystemMessages(messages), requestId);
 		const wasActive = this.webSockets.hasActiveConnection(connectionId);
 		const webSocketStatefulMarker = wasActive ? this.webSockets.getStatefulMarker(connectionId) : undefined;
 		const body = buildResponsesRequestBody(model, profile, messages, options, config, {
@@ -415,10 +515,37 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			logDebugWebSocketRequest(this.output, requestId, webSocketUrl, headers, toResponsesWebSocketCreateMessage(body));
 		}
 
-		await connection.connect(config.requestTimeoutMs, token);
 		try {
-			await connection.sendRequest(body, progress, token, model.config.providerModelId, connectionId);
+			await connection.connect(config.requestTimeoutMs, token);
+			await connection.sendRequest(body, progress, token, model.config.providerModelId, connectionId, {
+				output: this.output,
+				requestId,
+				logLevel: config.logLevel
+			});
 		} catch (error) {
+			if (shouldFallbackWebSocketToHttp(error)) {
+				this.webSockets.disposeConnection(connectionId);
+				if (shouldLogInfo(config.logLevel)) {
+					this.output.appendLine(`[${requestId}] websocket failed before streaming output; falling back to HTTP: ${formatErrorForLog(error)}`);
+				}
+				await this.provideHttpResponsesChatResponse(
+					model,
+					profile,
+					messages,
+					options,
+					progress,
+					token,
+					config,
+					requestUrl,
+					headers,
+					{
+						requestId: `${requestId}:http-fallback`,
+						ignoreStatefulMarker: true,
+						allowPreviousResponseId: false
+					}
+				);
+				return;
+			}
 			if (!body.previous_response_id || !isInvalidStatefulMarkerError(error)) {
 				throw error;
 			}
@@ -433,9 +560,41 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			if (config.logLevel === 'debug') {
 				logDebugWebSocketRequest(this.output, `${requestId}:retry`, webSocketUrl, headers, toResponsesWebSocketCreateMessage(retryBody));
 			}
-			await connection.sendRequest(retryBody, progress, token, model.config.providerModelId, connectionId);
+			try {
+				await connection.sendRequest(retryBody, progress, token, model.config.providerModelId, connectionId, {
+					output: this.output,
+					requestId: `${requestId}:retry`,
+					logLevel: config.logLevel
+				});
+			} catch (retryError) {
+				if (!shouldFallbackWebSocketToHttp(retryError)) {
+					throw retryError;
+				}
+				this.webSockets.disposeConnection(connectionId);
+				if (shouldLogInfo(config.logLevel)) {
+					this.output.appendLine(`[${requestId}:retry] websocket retry failed before streaming output; falling back to HTTP: ${formatErrorForLog(retryError)}`);
+				}
+				await this.provideHttpResponsesChatResponse(
+					model,
+					profile,
+					messages,
+					options,
+					progress,
+					token,
+					config,
+					requestUrl,
+					headers,
+					{
+						requestId: `${requestId}:http-fallback`,
+						ignoreStatefulMarker: true,
+						allowPreviousResponseId: false
+					}
+				);
+				return;
+			}
 		}
 
+		this.webSockets.setLastNonSystemMessageCount(connectionId, countNonSystemMessages(messages) + 1);
 		if (shouldLogInfo(config.logLevel)) {
 			this.output.appendLine(`[${requestId}] websocket completed`);
 		}
@@ -610,6 +769,46 @@ function logDebugWebSocketRequest(
 	output.appendLine(`WS ${requestUrl}`);
 	output.appendLine(`headers: ${stringifyJsonForLog(redactHeaders(headers))}`);
 	output.appendLine(`message: ${stringifyJsonForLog(message)}`);
+}
+
+function logDebugResponsesStreamEvent(
+	context: { output: vscode.OutputChannel; requestId: string; logLevel: LogLevel } | undefined,
+	event: ResponsesStreamEvent
+): void {
+	if (!context || context.logLevel !== 'debug') {
+		return;
+	}
+
+	if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') {
+		return;
+	}
+
+	const item = asRecord(event.item);
+	const response = asRecord(event.response);
+	const summary = {
+		type: event.type,
+		output_index: event.output_index,
+		item_type: stringValue(item?.type),
+		item_name: stringValue(item?.name),
+		item_call_id: stringValue(item?.call_id),
+		response_status: stringValue(response?.status),
+		response_output_count: Array.isArray(response?.output) ? response.output.length : undefined
+	};
+	context.output.appendLine(`[${context.requestId}] stream event ${stringifyJsonForLog(summary)}`);
+}
+
+function logDebugReportedToolCall(
+	context: ResponsesStreamProcessorContext | undefined,
+	callId: string,
+	name: string,
+	source: string
+): void {
+	if (!context || context.logLevel !== 'debug') {
+		return;
+	}
+	context.output.appendLine(
+		`[${context.requestId}] reported tool call ${stringifyJsonForLog({ source, call_id: callId, name })}`
+	);
 }
 
 function redactHeaders(headers: Record<string, string>): Record<string, string> {
@@ -1037,6 +1236,7 @@ function buildHeaders(profile: ProviderProfileConfig): Record<string, string> {
 }
 
 interface FetchOptions {
+	requestId: string;
 	method: 'POST';
 	headers: Record<string, string>;
 	body: string;
@@ -1045,51 +1245,185 @@ interface FetchOptions {
 	token: vscode.CancellationToken;
 }
 
-async function fetchWithRetry(requestUrl: string, options: FetchOptions): Promise<Response> {
-	let lastError: unknown;
+class CustomFetcherResponse {
+	public readonly ok: boolean;
+	private bytesReceived = 0;
+	private streamOutcomeReported = false;
 
-	for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
-		if (options.token.isCancellationRequested) {
-			throw new vscode.CancellationError();
+	public constructor(
+		public readonly status: number,
+		public readonly statusText: string,
+		public readonly headers: Headers,
+		public readonly body: ReadableStream<Uint8Array>,
+		private readonly requestId: string,
+		private readonly url: string,
+		private readonly reportEvent: (event: FetchEvent) => void
+	) {
+		this.ok = status >= 200 && status < 300;
+	}
+
+	public recordChunk(chunk: Uint8Array): void {
+		this.bytesReceived += chunk.byteLength;
+	}
+
+	public reportStreamSuccess(): void {
+		this.reportStreamOutcome('success');
+	}
+
+	public reportStreamError(reason: unknown): void {
+		this.reportStreamOutcome(isCancellationLikeError(reason) ? 'cancel' : 'error', reason);
+	}
+
+	public async text(): Promise<string> {
+		const reader = this.body.getReader();
+		const chunks: Uint8Array[] = [];
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+				this.recordChunk(value);
+				chunks.push(value);
+			}
+			this.reportStreamSuccess();
+		} catch (error) {
+			this.reportStreamError(error);
+			throw error;
+		} finally {
+			reader.releaseLock();
 		}
 
+		const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+		const result = new Uint8Array(totalLength);
+		let offset = 0;
+		for (const chunk of chunks) {
+			result.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return new TextDecoder().decode(result);
+	}
+
+	public async json(): Promise<unknown> {
+		return JSON.parse(await this.text());
+	}
+
+	public async destroy(reason?: unknown): Promise<void> {
 		try {
-			return await fetchOnce(requestUrl, options);
-		} catch (error) {
-			lastError = error;
-			if (options.token.isCancellationRequested || attempt >= options.maxRetries) {
-				break;
-			}
-			await delay(300 * Math.pow(2, attempt), options.token);
+			await this.body.cancel(reason);
+		} catch {
+			// Stream may already be closed or locked by a reader; callers only need best-effort cleanup.
 		}
 	}
 
-	throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	private reportStreamOutcome(outcome: FetchOutcome, reason?: unknown): void {
+		if (this.streamOutcomeReported) {
+			return;
+		}
+		this.streamOutcomeReported = true;
+		this.reportEvent({
+			requestId: this.requestId,
+			phase: 'responseStreaming',
+			outcome,
+			fetcher: 'undici-fetch',
+			url: this.url,
+			status: this.status,
+			reason,
+			bytesReceived: this.bytesReceived
+		});
+	}
 }
 
-async function fetchOnce(requestUrl: string, options: FetchOptions): Promise<Response> {
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
-	const cancellation = options.token.onCancellationRequested(() => controller.abort());
+class CustomFetcherService {
+	public constructor(private readonly output: vscode.OutputChannel) {}
 
-	try {
-		return await fetch(requestUrl, {
-			method: options.method,
-			headers: options.headers,
-			body: options.body,
-			signal: controller.signal
-		});
-	} finally {
-		clearTimeout(timeout);
-		cancellation.dispose();
+	public async fetch(requestUrl: string, options: FetchOptions): Promise<CustomFetcherResponse> {
+		let lastError: unknown;
+
+		for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
+			if (options.token.isCancellationRequested) {
+				throw new vscode.CancellationError();
+			}
+
+			try {
+				return await this.fetchOnce(requestUrl, options);
+			} catch (error) {
+				lastError = error;
+				if (options.token.isCancellationRequested || attempt >= options.maxRetries) {
+					break;
+				}
+				await delay(300 * Math.pow(2, attempt), options.token);
+			}
+		}
+
+		throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	}
+
+	private async fetchOnce(requestUrl: string, options: FetchOptions): Promise<CustomFetcherResponse> {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+		const cancellation = options.token.onCancellationRequested(() => controller.abort());
+
+		try {
+			const response = await fetch(requestUrl, {
+				method: options.method,
+				headers: options.headers,
+				body: options.body,
+				signal: controller.signal
+			});
+
+			this.reportEvent({
+				requestId: options.requestId,
+				phase: 'requestResponse',
+				outcome: 'success',
+				fetcher: 'undici-fetch',
+				url: requestUrl,
+				status: response.status
+			});
+
+			return new CustomFetcherResponse(
+				response.status,
+				response.statusText,
+				response.headers,
+				response.body ?? new ReadableStream<Uint8Array>({ start: (controller) => controller.close() }),
+				options.requestId,
+				requestUrl,
+				(event) => this.reportEvent(event)
+			);
+		} catch (error) {
+			const outcome: FetchOutcome = options.token.isCancellationRequested || isCancellationLikeError(error) ? 'cancel' : 'error';
+			this.reportEvent({
+				requestId: options.requestId,
+				phase: 'requestResponse',
+				outcome,
+				fetcher: 'undici-fetch',
+				url: requestUrl,
+				reason: error
+			});
+			throw error;
+		} finally {
+			clearTimeout(timeout);
+			cancellation.dispose();
+		}
+	}
+
+	private reportEvent(event: FetchEvent): void {
+		if (event.outcome === 'success') {
+			return;
+		}
+
+		this.output.appendLine(
+			`[${event.requestId}] fetch ${event.outcome} phase=${event.phase} status=${event.status ?? 'n/a'} bytes=${event.bytesReceived ?? 0} reason=${formatErrorForLog(event.reason)}`
+		);
 	}
 }
 
 async function readResponsesStream(
-	response: Response,
+	response: CustomFetcherResponse,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 	token: vscode.CancellationToken,
-	modelId: string
+	modelId: string,
+	context?: ResponsesStreamProcessorContext
 ): Promise<void> {
 	if (!response.body) {
 		throw new Error('Streaming response did not include a body.');
@@ -1098,36 +1432,208 @@ async function readResponsesStream(
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
-	const toolCalls = new Map<number, { callId?: string; name?: string; arguments: string }>();
+	const processor = new ResponsesStreamProcessor(progress, modelId, undefined, context);
+	const cancellation = token.onCancellationRequested(() => {
+		void reader.cancel(new vscode.CancellationError()).catch(() => undefined);
+	});
+	const handleRawEvent = (rawEvent: string): void => {
+		processor.handleRawSseEvent(rawEvent);
+	};
 
-	while (true) {
+	try {
+		while (true) {
+			if (token.isCancellationRequested) {
+				throw new vscode.CancellationError();
+			}
+
+			let chunk: ReadableStreamReadResult<Uint8Array>;
+			try {
+				chunk = await reader.read();
+			} catch (error) {
+				if (token.isCancellationRequested) {
+					throw new vscode.CancellationError();
+				}
+				throw formatResponsesStreamReadError(error, processor.eventCount, processor.lastEventType);
+			}
+
+			const { done, value } = chunk;
+			if (done) {
+				break;
+			}
+
+			response.recordChunk(value);
+			buffer += decoder.decode(value, { stream: true });
+			let separatorIndex = findSseSeparator(buffer);
+			while (separatorIndex >= 0) {
+				const rawEvent = buffer.slice(0, separatorIndex);
+				buffer = buffer.slice(separatorIndex + sseSeparatorLength(buffer, separatorIndex));
+				handleRawEvent(rawEvent);
+				separatorIndex = findSseSeparator(buffer);
+			}
+		}
+
+		buffer += decoder.decode();
+
 		if (token.isCancellationRequested) {
-			await reader.cancel();
 			throw new vscode.CancellationError();
 		}
 
-		const { done, value } = await reader.read();
-		if (done) {
-			break;
+		if (buffer.trim().length > 0) {
+			handleRawEvent(buffer);
 		}
 
-		buffer += decoder.decode(value, { stream: true });
-		let separatorIndex = findSseSeparator(buffer);
-		while (separatorIndex >= 0) {
-			const rawEvent = buffer.slice(0, separatorIndex);
-			buffer = buffer.slice(separatorIndex + sseSeparatorLength(buffer, separatorIndex));
-			handleSseEvent(rawEvent, progress, toolCalls, modelId);
-			separatorIndex = findSseSeparator(buffer);
+		processor.finishFromStreamEnd('Responses HTTP/SSE stream');
+		response.reportStreamSuccess();
+	} catch (error) {
+		response.reportStreamError(error);
+		try {
+			await reader.cancel(error);
+		} catch {
+			// The stream may already be closed after an abort or terminal event.
 		}
+		throw error;
+	} finally {
+		cancellation.dispose();
+		reader.releaseLock();
+	}
+}
+
+class ResponsesStreamProcessor {
+	private readonly toolCalls = new Map<number, { callId?: string; name?: string; arguments: string }>();
+	private readonly reportedToolCalls = new Set<string>();
+	private readonly outputItems: unknown[] = [];
+	private createdResponse: unknown;
+	private terminalReceived = false;
+	private didStream = false;
+	private textDeltaReported = false;
+	private count = 0;
+	private lastType: string | undefined;
+	private completedResponse: unknown;
+
+	public constructor(
+		private readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+		private readonly modelId: string,
+		private readonly connectionId?: string,
+		private readonly context?: ResponsesStreamProcessorContext
+	) {}
+
+	public get eventCount(): number {
+		return this.count;
 	}
 
-	if (buffer.trim().length > 0) {
-		handleSseEvent(buffer, progress, toolCalls, modelId);
+	public get lastEventType(): string | undefined {
+		return this.lastType;
+	}
+
+	public get terminalEventReceived(): boolean {
+		return this.terminalReceived;
+	}
+
+	public get streamingStarted(): boolean {
+		return this.didStream;
+	}
+
+	public get completedResponseId(): string | undefined {
+		return stringValue(asRecord(this.completedResponse)?.id);
+	}
+
+	public handleRawSseEvent(rawEvent: string): ResponsesStreamEvent | undefined {
+		const event = parseResponsesSseEvent(rawEvent);
+		if (!event) {
+			return undefined;
+		}
+		this.handleEvent(event);
+		return event;
+	}
+
+	public handleEvent(event: ResponsesStreamEvent): void {
+		this.count += 1;
+		this.lastType = event.type;
+		logDebugResponsesStreamEvent(this.context, event);
+
+		if (event.type === 'error') {
+			throw createResponsesApiError(event);
+		}
+
+		if (event.type === 'response.created') {
+			this.createdResponse = event.response;
+		}
+		if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') {
+			const hasDelta = typeof event.delta === 'string' && event.delta.length > 0;
+			this.textDeltaReported ||= hasDelta;
+			this.didStream ||= hasDelta;
+		}
+		if (isStreamingProgressEvent(event)) {
+			this.didStream = true;
+		}
+		if (event.type === 'response.output_item.done' && event.item !== undefined) {
+			this.outputItems.push(event.item);
+		}
+
+		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.reportedToolCalls, this.modelId, this.connectionId, this.context);
+
+		if (!isResponsesTerminalEvent(event)) {
+			return;
+		}
+
+		this.terminalReceived = true;
+		if (event.type !== 'response.completed') {
+			throw new Error(formatResponsesTerminalEvent(event));
+		}
+		this.completedResponse = event.response;
+	}
+
+	public finishFromStreamEnd(streamName: string): void {
+		if (this.terminalReceived) {
+			return;
+		}
+
+		const fallbackResponse = this.resolveSnapshotFallback(streamName);
+		this.completedResponse = fallbackResponse;
+		this.terminalReceived = true;
+		reportCompletedResponsePayload(
+			fallbackResponse,
+			this.progress,
+			this.reportedToolCalls,
+			this.modelId,
+			this.connectionId,
+			!this.textDeltaReported
+		);
+	}
+
+	private resolveSnapshotFallback(streamName: string): unknown {
+		const created = asRecord(this.createdResponse);
+		const hasSubstantiveOutput = this.outputItems.some((item) => asRecord(item)?.type !== 'reasoning');
+		const requestId = this.context?.requestId ?? 'unknown';
+
+		if (created && hasSubstantiveOutput) {
+			if (this.context && shouldLogInfo(this.context.logLevel)) {
+				this.context.output.appendLine(
+					`[${this.context.requestId}] ${streamName} ended without response.completed; using accumulated snapshot.`
+				);
+			}
+			if (this.context?.logLevel === 'debug') {
+				this.context.output.appendLine(
+					`[${this.context.requestId}] accumulated output items: ${stringifyJsonForLog(this.outputItems)}`
+				);
+			}
+			return {
+				...created,
+				output: this.outputItems
+			};
+		}
+
+		const message = `${streamName} ended without a response.completed event; eventCount=${this.count} lastEvent=${this.lastType ?? 'none'} requestId=${requestId}`;
+		if (this.context && shouldLogInfo(this.context.logLevel)) {
+			this.context.output.appendLine(`[${this.context.requestId}] ${message}`);
+		}
+		throw new Error(message);
 	}
 }
 
 class ResponsesWebSocketManager implements vscode.Disposable {
 	private readonly connections = new Map<string, ResponsesWebSocketConnection>();
+	private readonly lastNonSystemMessageCounts = new Map<string, number>();
 
 	public constructor(private readonly output: vscode.OutputChannel) {}
 
@@ -1169,11 +1675,44 @@ class ResponsesWebSocketManager implements vscode.Disposable {
 		return connection?.isOpen ? connection.statefulMarker : undefined;
 	}
 
+	public setLastNonSystemMessageCount(connectionId: string, count: number): void {
+		this.lastNonSystemMessageCounts.set(connectionId, count);
+	}
+
+	public maybeResetForConversationRewrite(
+		connectionId: string,
+		currentNonSystemMessageCount: number,
+		requestId: string
+	): void {
+		const connection = this.connections.get(connectionId);
+		if (!connection?.statefulMarker) {
+			return;
+		}
+
+		const lastNonSystemMessageCount = this.lastNonSystemMessageCounts.get(connectionId);
+		if (lastNonSystemMessageCount === undefined || currentNonSystemMessageCount < lastNonSystemMessageCount) {
+			this.output.appendLine(
+				`[${requestId}] resetting websocket state for connection ${connectionId}; currentMessages=${currentNonSystemMessageCount} previousMessages=${lastNonSystemMessageCount ?? 'unknown'}`
+			);
+			this.disposeConnection(connectionId);
+		}
+	}
+
+	public disposeConnection(connectionId: string): void {
+		const connection = this.connections.get(connectionId);
+		if (connection) {
+			connection.dispose();
+		}
+		this.connections.delete(connectionId);
+		this.lastNonSystemMessageCounts.delete(connectionId);
+	}
+
 	public dispose(): void {
 		for (const connection of this.connections.values()) {
 			connection.dispose();
 		}
 		this.connections.clear();
+		this.lastNonSystemMessageCounts.clear();
 	}
 }
 
@@ -1240,7 +1779,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 			const timeout = setTimeout(() => {
 				cleanup();
 				this.dispose();
-				reject(new Error(`WebSocket connection timed out after ${timeoutMs}ms.`));
+				reject(new ResponsesWebSocketTransportError(`WebSocket connection timed out after ${timeoutMs}ms.`));
 			}, timeoutMs);
 			const cancellation = token.onCancellationRequested(() => {
 				cleanup();
@@ -1267,12 +1806,12 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 			const onError = (event: Event) => {
 				cleanup();
 				this.open = false;
-				reject(new Error(webSocketEventErrorMessage(event, 'WebSocket connection error')));
+				reject(new ResponsesWebSocketTransportError(webSocketEventErrorMessage(event, 'WebSocket connection error'), event));
 			};
 			const onClose = (event: CloseEvent) => {
 				cleanup();
 				this.open = false;
-				reject(new Error(`WebSocket closed during connection setup: ${formatWebSocketClose(event)}`));
+				reject(new ResponsesWebSocketTransportError(`WebSocket closed during connection setup: ${formatWebSocketClose(event)}`, event));
 			};
 
 			ws.addEventListener('open', onOpen);
@@ -1289,7 +1828,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 
 			const parsed = safeJsonParse(event.data);
 			if (!isRecord(parsed)) {
-				this.activeRequest?.reject(new Error('Received invalid JSON from Responses WebSocket.'));
+				this.output.appendLine(`[${this.initiatingRequestId}] ignored invalid JSON from Responses WebSocket`);
 				return;
 			}
 
@@ -1304,7 +1843,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 		});
 
 		ws.addEventListener('error', (event: Event) => {
-			const error = new Error(webSocketEventErrorMessage(event, 'WebSocket error'));
+			const error = new ResponsesWebSocketTransportError(webSocketEventErrorMessage(event, 'WebSocket error'), event);
 			this.activeRequest?.reject(error);
 		});
 
@@ -1314,7 +1853,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 			const request = this.activeRequest;
 			this.activeRequest = undefined;
 			if (request && !request.settled) {
-				request.reject(new Error(`WebSocket closed: ${formatWebSocketClose(event)}`));
+				request.reject(new ResponsesWebSocketTransportError(`WebSocket closed: ${formatWebSocketClose(event)}`, event));
 			}
 			this.onDispose();
 		});
@@ -1325,21 +1864,28 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		token: vscode.CancellationToken,
 		modelId: string,
-		connectionId: string
+		connectionId: string,
+		context?: ResponsesStreamProcessorContext
 	): Promise<void> {
 		if (!this.ws || !this.isOpen) {
-			throw new Error('WebSocket is not connected.');
+			throw new ResponsesWebSocketTransportError('WebSocket is not connected.');
 		}
 
 		this.activeRequest?.reject(new Error('Request superseded by new WebSocket request.'));
-		const request = new ResponsesWebSocketActiveRequest(progress, modelId, connectionId);
+		const request = new ResponsesWebSocketActiveRequest(progress, modelId, connectionId, context);
 		this.activeRequest = request;
 		const cancellation = token.onCancellationRequested(() => request.reject(new vscode.CancellationError()));
 		request.done.finally(() => cancellation.dispose()).catch(() => undefined);
 
-		this.ws.send(JSON.stringify(toResponsesWebSocketCreateMessage(body)));
 		try {
+			this.ws.send(JSON.stringify(toResponsesWebSocketCreateMessage(body)));
 			await request.done;
+		} catch (error) {
+			if (error instanceof vscode.CancellationError || error instanceof ResponsesWebSocketRequestError) {
+				throw error;
+			}
+			const cause = error instanceof Error ? error : new Error(String(error));
+			throw new ResponsesWebSocketRequestError(cause.message, request.streamingStarted, cause);
 		} finally {
 			if (this.activeRequest === request) {
 				this.activeRequest = undefined;
@@ -1365,7 +1911,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 }
 
 class ResponsesWebSocketActiveRequest {
-	private readonly toolCalls = new Map<number, { callId?: string; name?: string; arguments: string }>();
+	private readonly processor: ResponsesStreamProcessor;
 	private resolveDone!: () => void;
 	private rejectDone!: (error: Error) => void;
 	private isSettled = false;
@@ -1374,8 +1920,10 @@ class ResponsesWebSocketActiveRequest {
 	public constructor(
 		private readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		private readonly modelId: string,
-		private readonly connectionId: string
+		private readonly connectionId: string,
+		private readonly context?: ResponsesStreamProcessorContext
 	) {
+		this.processor = new ResponsesStreamProcessor(progress, modelId, connectionId, context);
 		this.done = new Promise<void>((resolve, reject) => {
 			this.resolveDone = resolve;
 			this.rejectDone = reject;
@@ -1386,25 +1934,25 @@ class ResponsesWebSocketActiveRequest {
 		return this.isSettled;
 	}
 
+	public get streamingStarted(): boolean {
+		return this.processor.streamingStarted;
+	}
+
 	public handleEvent(event: ResponsesStreamEvent): void {
 		if (this.isSettled) {
 			return;
 		}
 
-		if (event.type === 'error') {
-			this.reject(new Error(formatResponsesErrorEvent(event)));
+		try {
+			this.processor.handleEvent(event);
+		} catch (error) {
+			this.reject(error instanceof Error ? error : new Error(String(error)));
 			return;
 		}
 
-		reportResponsesStreamEvent(event, this.progress, this.toolCalls, this.modelId, this.connectionId);
-
-		if (isResponsesTerminalEvent(event)) {
+		if (this.processor.terminalEventReceived) {
 			this.isSettled = true;
-			if (event.type === 'response.failed' || event.type === 'response.incomplete' || event.type === 'response.cancelled') {
-				this.rejectDone(new Error(formatResponsesTerminalEvent(event)));
-			} else {
-				this.resolveDone();
-			}
+			this.resolveDone();
 		}
 	}
 
@@ -1413,44 +1961,45 @@ class ResponsesWebSocketActiveRequest {
 			return;
 		}
 		this.isSettled = true;
-		this.rejectDone(error);
+		if (error instanceof vscode.CancellationError || error instanceof ResponsesWebSocketRequestError) {
+			this.rejectDone(error);
+			return;
+		}
+		this.rejectDone(new ResponsesWebSocketRequestError(error.message, this.processor.streamingStarted, error));
 	}
 }
 
-function handleSseEvent(
-	rawEvent: string,
-	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
-	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
-	modelId: string
-): void {
+function parseResponsesSseEvent(rawEvent: string): ResponsesStreamEvent | undefined {
 	const dataLines = rawEvent
 		.split(/\r?\n/)
 		.filter((line) => line.startsWith('data:'))
 		.map((line) => line.slice(5).trimStart());
 
 	if (dataLines.length === 0) {
-		return;
+		return undefined;
 	}
 
 	const data = dataLines.join('\n');
 	if (data === '[DONE]') {
-		return;
+		return undefined;
 	}
 
 	const event = safeJsonParse(data);
 	if (!isRecord(event)) {
-		return;
+		return undefined;
 	}
 
-	reportResponsesStreamEvent(event as ResponsesStreamEvent, progress, toolCalls, modelId);
+	return event as ResponsesStreamEvent;
 }
 
 function reportResponsesStreamEvent(
 	event: ResponsesStreamEvent,
 	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
+	reportedToolCalls: Set<string>,
 	modelId: string,
-	connectionId?: string
+	connectionId?: string,
+	context?: ResponsesStreamProcessorContext
 ): void {
 	switch (event.type) {
 		case 'response.output_text.delta':
@@ -1466,9 +2015,13 @@ function reportResponsesStreamEvent(
 			rememberToolCallArgumentsDelta(event, toolCalls);
 			break;
 		case 'response.output_item.done':
-			reportToolCallDone(event, toolCalls, progress);
+			reportToolCallDone(event, toolCalls, reportedToolCalls, progress, context);
+			break;
+		case 'response.function_call_arguments.done':
+			rememberToolCallArgumentsDone(event, toolCalls);
 			break;
 		case 'response.completed':
+			reportToolCallsFromCompletedResponse(event, reportedToolCalls, progress, context);
 			if (connectionId) {
 				reportStatefulMarker(event.response, modelId, progress, connectionId);
 			}
@@ -1508,10 +2061,30 @@ function rememberToolCallArgumentsDelta(
 	toolCalls.set(index, existing);
 }
 
+function rememberToolCallArgumentsDone(
+	event: ResponsesStreamEvent,
+	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>
+): void {
+	const index = typeof event.output_index === 'number' ? event.output_index : 0;
+	const existing = toolCalls.get(index) ?? { arguments: '' };
+	const item = asRecord(event.item);
+	const callId = stringValue(event.call_id) ?? stringValue(item?.call_id);
+	const name = stringValue(event.name) ?? stringValue(item?.name);
+	const argumentsText = stringValue(event.arguments) ?? stringValue(item?.arguments);
+
+	toolCalls.set(index, {
+		callId: callId ?? existing.callId,
+		name: name ?? existing.name,
+		arguments: argumentsText ?? existing.arguments
+	});
+}
+
 function reportToolCallDone(
 	event: ResponsesStreamEvent,
 	toolCalls: Map<number, { callId?: string; name?: string; arguments: string }>,
-	progress: vscode.Progress<vscode.LanguageModelResponsePart>
+	reportedToolCalls: Set<string>,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	context?: ResponsesStreamProcessorContext
 ): void {
 	const item = asRecord(event.item);
 	if (item?.type !== 'function_call') {
@@ -1528,8 +2101,61 @@ function reportToolCallDone(
 		return;
 	}
 
+	if (reportedToolCalls.has(callId)) {
+		toolCalls.delete(index);
+		return;
+	}
+
+	reportedToolCalls.add(callId);
+	logDebugReportedToolCall(context, callId, name, 'output_item.done');
 	progress.report(new vscode.LanguageModelToolCallPart(callId, name, safeJsonParseObject(argsText)));
 	toolCalls.delete(index);
+}
+
+function reportToolCallsFromCompletedResponse(
+	event: ResponsesStreamEvent,
+	reportedToolCalls: Set<string>,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	context?: ResponsesStreamProcessorContext
+): void {
+	reportToolCallsFromPayload(event.response, reportedToolCalls, progress, context, 'response.completed');
+}
+
+function reportCompletedResponsePayload(
+	payload: unknown,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	reportedToolCalls: Set<string>,
+	modelId: string,
+	connectionId?: string,
+	reportText = true
+): void {
+	if (reportText) {
+		for (const text of extractTextFromResponsesPayload(payload)) {
+			progress.report(new vscode.LanguageModelTextPart(text));
+		}
+	}
+	reportToolCallsFromPayload(payload, reportedToolCalls, progress, undefined, 'completed-payload');
+	if (connectionId) {
+		reportStatefulMarker(payload, modelId, progress, connectionId);
+	}
+	reportUsagePart(payload, progress);
+}
+
+function reportToolCallsFromPayload(
+	payload: unknown,
+	reportedToolCalls: Set<string>,
+	progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+	context?: ResponsesStreamProcessorContext,
+	source = 'payload'
+): void {
+	for (const toolCall of extractToolCallsFromResponsesPayload(payload)) {
+		if (reportedToolCalls.has(toolCall.callId)) {
+			continue;
+		}
+		reportedToolCalls.add(toolCall.callId);
+		logDebugReportedToolCall(context, toolCall.callId, toolCall.name, source);
+		progress.report(new vscode.LanguageModelToolCallPart(toolCall.callId, toolCall.name, toolCall.input));
+	}
 }
 
 function reportNonStreamingResponse(
@@ -1656,6 +2282,57 @@ function isResponsesTerminalEvent(event: ResponsesStreamEvent): boolean {
 		|| event.type === 'response.cancelled';
 }
 
+function isStreamingProgressEvent(event: ResponsesStreamEvent): boolean {
+	if (typeof event.delta === 'string' && event.delta.length > 0) {
+		return event.type === 'response.output_text.delta'
+			|| event.type === 'response.refusal.delta'
+			|| event.type === 'response.function_call_arguments.delta'
+			|| event.type === 'response.custom_tool_call_input.delta';
+	}
+
+	return event.type === 'response.output_item.done'
+		&& asRecord(event.item)?.type === 'function_call';
+}
+
+function throwIfResponsesPayloadTerminalError(payload: unknown): void {
+	const eventLike = asResponsesTerminalEvent(payload);
+	if (!eventLike || eventLike.type === 'response.completed') {
+		return;
+	}
+
+	throw new Error(formatResponsesTerminalEvent(eventLike));
+}
+
+function asResponsesTerminalEvent(source: unknown): ResponsesStreamEvent | undefined {
+	const record = asRecord(source);
+	if (!record) {
+		return undefined;
+	}
+
+	const eventType = stringValue(record.type);
+	if (eventType === 'response.completed'
+		|| eventType === 'response.failed'
+		|| eventType === 'response.incomplete'
+		|| eventType === 'response.cancelled') {
+		return record as ResponsesStreamEvent;
+	}
+
+	const response = asRecord(record.response) ?? record;
+	const status = stringValue(response.status);
+	if (!status || status === 'completed') {
+		return undefined;
+	}
+
+	if (status === 'failed' || status === 'incomplete' || status === 'cancelled') {
+		return {
+			type: `response.${status}`,
+			response
+		};
+	}
+
+	return undefined;
+}
+
 function formatResponsesErrorEvent(event: ResponsesStreamEvent): string {
 	const error = asRecord(event.error);
 	const code = stringValue(error?.code) ?? stringValue(event.code);
@@ -1663,12 +2340,67 @@ function formatResponsesErrorEvent(event: ResponsesStreamEvent): string {
 	return code ? `${message} (${code})` : message;
 }
 
+function createResponsesApiError(event: ResponsesStreamEvent): ResponsesApiError {
+	const error = asRecord(event.error);
+	const code = stringValue(error?.code) ?? stringValue(event.code);
+	const errorType = stringValue(error?.type) ?? stringValue(event.type);
+	const status = typeof error?.status === 'number'
+		? error.status
+		: typeof event.status === 'number'
+			? event.status
+			: undefined;
+	return new ResponsesApiError(formatResponsesErrorEvent(event), {
+		code,
+		errorType,
+		status
+	});
+}
+
 function formatResponsesTerminalEvent(event: ResponsesStreamEvent): string {
 	const response = asRecord(event.response);
 	const responseError = asRecord(response?.error);
-	const code = stringValue(responseError?.code) ?? stringValue(response?.status);
-	const message = stringValue(responseError?.message) ?? `Responses WebSocket ended with ${event.type}`;
+	const incompleteDetails = asRecord(response?.incomplete_details);
+	const code = stringValue(responseError?.code)
+		?? stringValue(incompleteDetails?.reason)
+		?? stringValue(response?.status);
+	const message = stringValue(responseError?.message)
+		?? stringValue(response?.message)
+		?? `Responses request ended with ${event.type}`;
 	return code ? `${message} (${code})` : message;
+}
+
+function formatResponsesStreamReadError(error: unknown, eventCount: number, lastEventType: string | undefined): Error {
+	const message = error instanceof Error ? error.message : String(error);
+	const name = error instanceof Error ? error.name : undefined;
+	const original = name && message && !message.startsWith(name) ? `${name}: ${message}` : message;
+	const suffix = `eventCount=${eventCount} lastEvent=${lastEventType ?? 'none'}`;
+	return new Error(`Responses HTTP/SSE stream was terminated before a terminal event; ${suffix}; original=${original}`);
+}
+
+function isCancellationLikeError(error: unknown): boolean {
+	if (error instanceof vscode.CancellationError) {
+		return true;
+	}
+
+	const record = asRecord(error);
+	const name = stringValue(record?.name);
+	const code = stringValue(record?.code);
+	const message = (stringValue(record?.message) ?? String(error)).toLowerCase();
+	return name === 'AbortError'
+		|| name === 'CancellationError'
+		|| code === 'ABORT_ERR'
+		|| message.includes('abort')
+		|| message.includes('cancel');
+}
+
+function formatErrorForLog(error: unknown): string {
+	if (error === undefined) {
+		return 'n/a';
+	}
+	if (error instanceof Error) {
+		return error.name && error.message ? `${error.name}: ${error.message}` : error.message || error.name;
+	}
+	return String(error);
 }
 
 function isInvalidStatefulMarkerError(error: unknown): boolean {
@@ -1682,6 +2414,30 @@ function isInvalidStatefulMarkerError(error: unknown): boolean {
 			|| normalized.includes('stateful')
 			|| normalized.includes('conversation')
 		);
+}
+
+function shouldFallbackWebSocketToHttp(error: unknown): boolean {
+	if (isCancellationLikeError(error)) {
+		return false;
+	}
+
+	const requestError = error instanceof ResponsesWebSocketRequestError ? error : undefined;
+	if (requestError?.didStream) {
+		return false;
+	}
+
+	const cause = requestError ? (requestError as Error & { cause?: unknown }).cause : error;
+	if (cause instanceof ResponsesWebSocketTransportError) {
+		return true;
+	}
+	if (cause instanceof ResponsesApiError) {
+		return cause.errorType === 'websocket_error' && (
+			cause.status === 429
+			|| cause.status === 500
+			|| cause.status === 503
+		);
+	}
+	return false;
 }
 
 function webSocketEventErrorMessage(event: Event, fallback: string): string {
@@ -1698,7 +2454,7 @@ function formatWebSocketClose(event: CloseEvent): string {
 	return `code=${event.code}${reason}, wasClean=${event.wasClean}`;
 }
 
-async function formatHttpError(response: Response): Promise<string> {
+async function formatHttpError(response: CustomFetcherResponse): Promise<string> {
 	const text = await response.text();
 	const details = text.length > 1200 ? `${text.slice(0, 1200)}...` : text;
 	return `Custom OpenAI Responses request failed: HTTP ${response.status} ${response.statusText}${details ? `\n${details}` : ''}`;
@@ -2071,8 +2827,13 @@ function resolveResponsesWebSocketUrl(requestUrl: string): string {
 	}
 }
 
-function shouldUseWebSocketResponsesApi(model: ModelConfig): boolean {
-	return model.supportedEndpoints?.includes(webSocketResponsesEndpoint) ?? false;
+function shouldUseWebSocketResponsesApi(
+	model: ModelConfig,
+	options: vscode.ProvideLanguageModelChatResponseOptions
+): boolean {
+	return (model.supportedEndpoints?.includes(webSocketResponsesEndpoint) ?? false)
+		&& Boolean(model.toolCalling)
+		&& Boolean(options.tools?.length);
 }
 
 function toResponsesWebSocketCreateMessage(body: ResponsesRequestBody): Record<string, unknown> {
@@ -2215,6 +2976,10 @@ function extensionFromMimeType(mimeType: string): string {
 function isSystemMessageRole(role: vscode.LanguageModelChatMessageRole): boolean {
 	const systemRole = (vscode.LanguageModelChatMessageRole as unknown as Record<string, number>).System ?? 3;
 	return role === systemRole;
+}
+
+function countNonSystemMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): number {
+	return messages.filter((message) => !isSystemMessageRole(message.role)).length;
 }
 
 function encodeStatefulMarker(modelId: string, marker: string, connectionId?: string): Uint8Array {
