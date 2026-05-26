@@ -413,7 +413,7 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 
 		const headers = buildHeaders(profile);
 		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-		const useWebSocket = shouldUseWebSocketResponsesApi(model.config.model, options);
+		const useWebSocket = shouldUseWebSocketResponsesApi(model.config.model);
 
 		if (useWebSocket) {
 			await this.provideWebSocketResponsesChatResponse(
@@ -574,11 +574,14 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 		const connectionId = messageMarker?.connectionId ?? crypto.randomUUID();
 		this.webSockets.maybeResetForConversationRewrite(connectionId, countNonSystemMessages(messages), requestId);
 		const wasActive = this.webSockets.hasActiveConnection(connectionId);
-		const webSocketStatefulMarker = wasActive ? this.webSockets.getStatefulMarker(connectionId) : undefined;
+		const zeroDataRetentionEnabled = Boolean(model.config.model.zeroDataRetentionEnabled);
+		const webSocketStatefulMarker = wasActive && !zeroDataRetentionEnabled
+			? this.webSockets.getStatefulMarker(connectionId)
+			: undefined;
 		const body = buildResponsesRequestBody(model, profile, messages, options, config, {
-			ignoreStatefulMarker: !wasActive || Boolean(model.config.model.zeroDataRetentionEnabled),
+			ignoreStatefulMarker: true,
 			webSocketStatefulMarker,
-			allowPreviousResponseId: wasActive && !model.config.model.zeroDataRetentionEnabled
+			allowPreviousResponseId: wasActive && !zeroDataRetentionEnabled
 		});
 		const webSocketUrl = resolveResponsesWebSocketUrl(requestUrl);
 		const connection = this.webSockets.getOrCreateConnection(connectionId, webSocketUrl, headers, requestId);
@@ -1144,15 +1147,15 @@ function getRequestStatefulMarker(
 	modelIds: readonly string[],
 	stateOptions: ResponsesRequestStateOptions
 ): { marker: StatefulMarkerData; index: number } | undefined {
-	if (stateOptions.ignoreStatefulMarker) {
-		return undefined;
-	}
-
 	if (stateOptions.webSocketStatefulMarker) {
 		const markerAndIndex = getStatefulMarkerAndIndex(messages, modelIds, stateOptions.webSocketStatefulMarker);
 		if (markerAndIndex) {
 			return markerAndIndex;
 		}
+		return undefined;
+	}
+
+	if (stateOptions.ignoreStatefulMarker) {
 		return undefined;
 	}
 
@@ -1447,6 +1450,7 @@ const reservedExtraHeaderNames = new Set([
 	'host',
 	'keep-alive',
 	'origin',
+	'openai-intent',
 	'permissions-policy',
 	'referer',
 	'te',
@@ -2071,9 +2075,9 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 		}
 
 		const WebSocketCtor = WebSocket as unknown as {
-			new(url: string, protocols?: string | string[], options?: { headers?: Record<string, string> }): WebSocket;
+			new(url: string, protocols?: string | string[] | { protocols?: string | string[]; headers?: Record<string, string> }): WebSocket;
 		};
-		const ws = new WebSocketCtor(this.url, [], { headers: this.headers });
+		const ws = new WebSocketCtor(this.url, { headers: this.headers });
 		this.ws = ws;
 
 		await new Promise<void>((resolve, reject) => {
@@ -2271,10 +2275,16 @@ class ResponsesWebSocketActiveRequest {
 }
 
 function parseResponsesSseEvent(rawEvent: string): ResponsesStreamEvent | undefined {
-	const dataLines = rawEvent
-		.split(/\r?\n/)
-		.filter((line) => line.startsWith('data:'))
-		.map((line) => line.slice(5).trimStart());
+	const lines = rawEvent.split(/\r?\n/);
+	let eventType: string | undefined;
+	const dataLines: string[] = [];
+	for (const line of lines) {
+		if (line.startsWith('event:')) {
+			eventType = line.slice(6).trim() || eventType;
+		} else if (line.startsWith('data:')) {
+			dataLines.push(line.slice(5).trimStart());
+		}
+	}
 
 	if (dataLines.length === 0) {
 		return undefined;
@@ -2288,6 +2298,10 @@ function parseResponsesSseEvent(rawEvent: string): ResponsesStreamEvent | undefi
 	const event = safeJsonParse(data);
 	if (!isRecord(event)) {
 		return undefined;
+	}
+
+	if (typeof event.type !== 'string' && eventType) {
+		return { ...event, type: eventType } as ResponsesStreamEvent;
 	}
 
 	return event as ResponsesStreamEvent;
@@ -2470,8 +2484,9 @@ function reportRoundTripDataParts(
 	for (const item of extractReasoningItemsFromResponsesPayload(payload)) {
 		progress.report(new vscode.LanguageModelDataPart(encodeInternalDataPart(item), reasoningMimeType));
 	}
-	for (const item of extractContextManagementItemsFromResponsesPayload(payload)) {
-		progress.report(new vscode.LanguageModelDataPart(encodeInternalDataPart(item), contextManagementMimeType));
+	const compactionItem = extractLatestContextManagementItemFromResponsesPayload(payload);
+	if (compactionItem) {
+		progress.report(new vscode.LanguageModelDataPart(encodeInternalDataPart(compactionItem), contextManagementMimeType));
 	}
 }
 
@@ -2589,8 +2604,8 @@ function extractReasoningItemsFromResponsesPayload(payload: unknown): ResponsesR
 	return items;
 }
 
-function extractContextManagementItemsFromResponsesPayload(payload: unknown): ResponsesContextManagementItem[] {
-	const items: ResponsesContextManagementItem[] = [];
+function extractLatestContextManagementItemFromResponsesPayload(payload: unknown): ResponsesContextManagementItem | undefined {
+	let latest: ResponsesContextManagementItem | undefined;
 	for (const item of extractResponsesOutputItems(payload)) {
 		const record = asRecord(item);
 		if (record?.type !== 'compaction') {
@@ -2603,13 +2618,13 @@ function extractContextManagementItemsFromResponsesPayload(payload: unknown): Re
 			continue;
 		}
 
-		items.push({
+		latest = {
 			type: 'compaction',
 			id,
 			encrypted_content: encryptedContent
-		});
+		};
 	}
-	return items;
+	return latest;
 }
 
 function extractResponsesOutputItems(payload: unknown): unknown[] {
@@ -3221,13 +3236,8 @@ function resolveResponsesWebSocketUrl(requestUrl: string): string {
 	}
 }
 
-function shouldUseWebSocketResponsesApi(
-	model: ModelConfig,
-	options: vscode.ProvideLanguageModelChatResponseOptions
-): boolean {
-	return (model.supportedEndpoints?.includes(webSocketResponsesEndpoint) ?? false)
-		&& Boolean(model.toolCalling)
-		&& Boolean(options.tools?.length);
+function shouldUseWebSocketResponsesApi(model: ModelConfig): boolean {
+	return model.supportedEndpoints?.includes(webSocketResponsesEndpoint) ?? false;
 }
 
 function toStatefulMarkerReportOptions(
