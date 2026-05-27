@@ -625,7 +625,10 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 
 		try {
 			await connection.connect(config.requestTimeoutMs, token);
-			await connection.sendRequest(body, progress, token, model.config.providerModelId, connectionId, {
+			await connection.sendRequest(body, progress, token, model.config.providerModelId, {
+				enabled: !zeroDataRetentionEnabled,
+				connectionId
+			}, {
 				output: this.output,
 				requestId,
 				logLevel: config.logLevel
@@ -669,7 +672,10 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 				logDebugWebSocketRequest(this.output, `${requestId}:retry`, webSocketUrl, headers, toResponsesWebSocketCreateMessage(retryBody));
 			}
 			try {
-				await connection.sendRequest(retryBody, progress, token, model.config.providerModelId, connectionId, {
+				await connection.sendRequest(retryBody, progress, token, model.config.providerModelId, {
+					enabled: !zeroDataRetentionEnabled,
+					connectionId
+				}, {
 					output: this.output,
 					requestId: `${requestId}:retry`,
 					logLevel: config.logLevel
@@ -2296,7 +2302,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 				return;
 			}
 
-			if (parsed.type === 'response.completed') {
+			if (parsed.type === 'response.completed' && this.activeRequest?.statefulMarkerEnabled) {
 				const responseId = stringValue(asRecord(parsed.response)?.id);
 				if (responseId) {
 					this.marker = responseId;
@@ -2328,7 +2334,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		token: vscode.CancellationToken,
 		modelId: string,
-		connectionId: string,
+		statefulMarker: ResponsesStatefulMarkerReportOptions,
 		context?: ResponsesStreamProcessorContext
 	): Promise<void> {
 		if (!this.ws || !this.isOpen) {
@@ -2336,7 +2342,7 @@ class ResponsesWebSocketConnection implements vscode.Disposable {
 		}
 
 		this.activeRequest?.reject(new Error('Request superseded by new WebSocket request.'));
-		const request = new ResponsesWebSocketActiveRequest(progress, modelId, connectionId, context);
+		const request = new ResponsesWebSocketActiveRequest(progress, modelId, statefulMarker, context);
 		this.activeRequest = request;
 		const cancellation = token.onCancellationRequested(() => request.reject(new vscode.CancellationError()));
 		request.done.finally(() => cancellation.dispose()).catch(() => undefined);
@@ -2384,10 +2390,10 @@ class ResponsesWebSocketActiveRequest {
 	public constructor(
 		private readonly progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		private readonly modelId: string,
-		private readonly connectionId: string,
+		private readonly statefulMarker: ResponsesStatefulMarkerReportOptions,
 		private readonly context?: ResponsesStreamProcessorContext
 	) {
-		this.processor = new ResponsesStreamProcessor(progress, modelId, { enabled: true, connectionId }, context);
+		this.processor = new ResponsesStreamProcessor(progress, modelId, statefulMarker, context);
 		this.done = new Promise<void>((resolve, reject) => {
 			this.resolveDone = resolve;
 			this.rejectDone = reject;
@@ -2400,6 +2406,10 @@ class ResponsesWebSocketActiveRequest {
 
 	public get streamingStarted(): boolean {
 		return this.processor.streamingStarted;
+	}
+
+	public get statefulMarkerEnabled(): boolean {
+		return this.statefulMarker.enabled;
 	}
 
 	public handleEvent(event: ResponsesStreamEvent): void {
@@ -3487,7 +3497,7 @@ function toStatefulMarkerReportOptions(
 	requestOptions: ResponsesHttpRequestOptions
 ): ResponsesStatefulMarkerReportOptions {
 	return {
-		enabled: requestOptions.allowPreviousResponseId && !model.config.model.zeroDataRetentionEnabled
+		enabled: !model.config.model.zeroDataRetentionEnabled
 	};
 }
 
