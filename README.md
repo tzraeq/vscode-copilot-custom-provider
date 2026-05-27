@@ -8,11 +8,11 @@ VS Code Insiders already provides a built-in **Custom Endpoint** provider for BY
 
 https://code.visualstudio.com/updates/v1_121#_custom-endpoint-provider-for-byok-insiders
 
-Use the built-in provider when it covers your needs. This extension is mainly for cases where you need extra control that the built-in Custom Endpoint provider does not currently expose, such as per-model `reasoningEffort` and request-body patches like `patch.dropTruncation`.
+The next development target for this extension is behavior parity with VS Code's built-in Custom Endpoint/BYOK provider for the Responses API path, while keeping request-body patches like `patch.dropTruncation` available for relay compatibility.
 
 ## Requirements
 
-- VS Code `1.106.0` or newer.
+- VS Code `1.121.0` or newer with the `chatProvider` proposed API available.
 - One or more services compatible with the OpenAI Responses API.
 
 ## Quick Setup
@@ -33,6 +33,7 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "toolCalling": true,
           "vision": true,
           "reasoningEffort": "medium",
+          "supportsReasoningEffort": ["minimal", "low", "medium", "high", "xhigh"],
           "patch": {
             "dropTruncation": true
           }
@@ -43,7 +44,8 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "name": "GPT-5.5 High",
           "toolCalling": true,
           "vision": true,
-          "reasoningEffort": "high"
+          "reasoningEffort": "high",
+          "supportsReasoningEffort": ["minimal", "low", "medium", "high", "xhigh"]
         }
       ]
     },
@@ -58,6 +60,7 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "toolCalling": true,
           "vision": true,
           "reasoningEffort": "medium",
+          "supportsReasoningEffort": ["minimal", "low", "medium", "high", "xhigh"],
           "supportedEndpoints": ["/responses", "ws:/responses"]
         }
       ]
@@ -76,10 +79,12 @@ This step is important. `settings.json` defines the profiles and models, but the
 
 ## Base URL
 
-`baseUrl` can be either a host root or a full Responses API URL:
+`baseUrl` follows VS Code Custom Endpoint URL resolution for the `responses` API type:
 
-- `https://host-a.example.com` or `https://host-a.example.com:8443`: requests are sent to `/v1/responses` automatically.
-- `https://host-a.example.com/proxy/v1/responses`: this URL is used exactly as configured. Use this form when a relay service has an extra path segment.
+- `https://host-a.example.com`: requests are sent to `https://host-a.example.com/v1/responses`.
+- `https://host-a.example.com/v1`: requests are sent to `https://host-a.example.com/v1/responses`.
+- `https://host-a.example.com/proxy`: requests are sent to `https://host-a.example.com/proxy/v1/responses`.
+- URLs already containing `/responses`, `/chat/completions`, or `/messages` are treated as explicit endpoint URLs and used as configured.
 
 The same rule applies to model-level `baseUrl`. If a model does not set `baseUrl`, it uses the profile `baseUrl`.
 
@@ -94,13 +99,12 @@ Keys should normally be set with `Custom OpenAI Responses: Set API Key`.
 - SecretStorage takes priority over inline `apiKey`.
 - Use `Custom OpenAI Responses: Clear API Key` to remove the stored key for one profile.
 
-By default, requests use:
+When `apiKeyHeader` is omitted, requests follow VS Code Custom Endpoint's default auth selection:
 
-```text
-Authorization: Bearer <key>
-```
+- URLs containing `openai.azure` use `api-key: <key>`.
+- Other URLs use `Authorization: Bearer <key>`.
 
-Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a different auth header.
+Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a different default. For per-model gateways, use `models[].requestHeaders`; `authorization` and `api-key` can override the inferred auth header, and `${apiKey}` is replaced with the profile key.
 
 ## Profile Fields
 
@@ -108,11 +112,11 @@ Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a differen
 | --- | --- | --- | --- |
 | `id` | Yes | - | Stable profile id. Used for SecretStorage and default model ids. Must be unique. |
 | `name` | No | `id` | Display name shown in model details and key prompts. |
-| `baseUrl` | Usually | - | Service base URL for this profile. If it has no path, `/v1/responses` is appended automatically. If it has a path, it is used exactly as configured. Can be omitted if every model has its own `baseUrl`. |
+| `baseUrl` | Usually | - | Service base URL for this profile. Unless it already contains `/responses`, `/chat/completions`, or `/messages`, `/v1/responses` is appended using the same rule as VS Code Custom Endpoint. Can be omitted if every model has its own `baseUrl`. |
 | `apiKey` | No | - | Inline key fallback. Prefer the Set API Key command. |
 | `requireApiKey` | No | `true` | Require a key when using this profile. Models still appear before a key is set. Set `false` for local/proxy endpoints that need no key. |
-| `apiKeyHeader` | No | `Authorization` | Header name used for the key. |
-| `apiKeyPrefix` | No | `Bearer ` | Prefix before the key. Use `""` for raw key headers. |
+| `apiKeyHeader` | No | inferred | Optional profile-level auth header override. When omitted, `openai.azure` URLs use `api-key`; other URLs use `Authorization`. |
+| `apiKeyPrefix` | No | `Bearer ` | Prefix used when `apiKeyHeader` is explicitly set. Use `""` for raw key headers. |
 | `extraHeaders` | No | `{}` | Extra static headers for this profile. Reserved, unsafe, and auth-related header overrides are ignored. Do not put secrets here. |
 | `requestBodyOverrides` | No | `{}` | JSON fields merged into every request for this profile. |
 | `models` | No | GPT-5 default | Models shown under this profile. |
@@ -132,11 +136,17 @@ Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a differen
 | `maxOutputTokens` | No | `16384` | Output token budget advertised and sent as `max_output_tokens`. |
 | `toolCalling` | No | `false` | Advertise tool support and forward VS Code tools to the Responses API request. |
 | `vision` | No | `false` | Advertise image input support. Image data is sent as Responses API `input_image`. |
-| `reasoningEffort` | No | global default | Sent as `reasoning.effort`. Values: `minimal`, `low`, `medium`, `high`, `xhigh`. |
+| `thinking` | No | `false` | Advertise thinking support. When `true`, requests include `reasoning.encrypted_content`, encrypted reasoning items are round-tripped, and `temperature` is removed from the final body. |
+| `streaming` | No | global setting | Set `false` to send `stream: false` for this model even when global streaming is enabled. |
+| `editTools` | No | - | Edit tool hints exposed through VS Code model capabilities: `find-replace`, `multi-find-replace`, `apply-patch`, `code-rewrite`. |
+| `reasoningEffort` | No | unset | Preferred/default reasoning effort for this model. The value can be any string; when `supportsReasoningEffort` is set, it is used only if included in that advertised list. |
+| `supportsReasoningEffort` | No | omitted | Reasoning effort levels accepted by the model. Omit to disable the Thinking Effort picker, set `[]` to use the provider default five levels, or set a non-empty array to use those exact picker values. |
+| `reasoningEffortFormat` | No | `responses` | `responses` sends nested `reasoning.effort`; `chat-completions` sends top-level `reasoning_effort`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
 | `zeroDataRetentionEnabled` | No | `false` | Matches VS Code Custom Endpoint naming. When `true`, `previous_response_id` is not sent and requests use `store: false`. |
 | `supportedEndpoints` | No | `["/responses"]` | Matches VS Code Custom Endpoint endpoint metadata. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
+| `requestHeaders` | No | `{}` | Model-level headers matching VS Code Custom Endpoint `requestHeaders`. Auth headers can override the inferred default, and `${apiKey}` is interpolated. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
 | `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
 
@@ -145,7 +155,7 @@ Change `apiKeyHeader` or `apiKeyPrefix` only if your service requires a differen
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `copilotCustomProvider.enabled` | `true` | Enable or disable the provider. |
-| `copilotCustomProvider.defaultReasoningEffort` | `medium` | Used when a model does not set `reasoningEffort`. |
+| `copilotCustomProvider.defaultReasoningEffort` | `medium` | Used for display/name fallback. Request bodies only use it indirectly when a model advertises `supportsReasoningEffort`, does not set `reasoningEffort`, and accepts `medium`. |
 | `copilotCustomProvider.requestTimeoutMs` | `120000` | HTTP timeout in milliseconds. |
 | `copilotCustomProvider.enableStreaming` | `true` | Request streaming responses. |
 | `copilotCustomProvider.maxRetries` | `1` | Retry count for failed non-cancelled HTTP requests. |
@@ -185,9 +195,9 @@ If one profile exposes the same upstream model multiple times, set different `pr
 
 ## Reasoning Effort
 
-Third-party VS Code language model providers do not get Copilot's native Thinking Effort switch. Configure `reasoningEffort` per model instead.
+Set `supportsReasoningEffort` in `settings.json` to expose Copilot's native Thinking Effort picker for that model. Omit the property to leave the picker disabled. Set it to `[]` to use the provider default five levels, currently `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values. The selected value is received as `options.modelConfiguration.reasoningEffort` and sent to the Responses API as nested `reasoning.effort` by default.
 
-To give users a picker-level choice, expose multiple entries with the same upstream `id` and different `providerId` values, such as `gpt-5-low`, `gpt-5-medium`, and `gpt-5-high`.
+Request priority is `options.modelConfiguration.reasoningEffort`, then `options.modelOptions.reasoningEffort`, then `options.modelOptions.reasoning.effort`, then model `reasoningEffort`. If no request value exists, the default is chosen from the advertised enum: model `reasoningEffort`, then global `defaultReasoningEffort`, then `high` for Claude families or `medium` for others, then the first advertised level.
 
 ## Relay Compatibility
 

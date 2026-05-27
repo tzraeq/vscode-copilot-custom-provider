@@ -2,6 +2,8 @@
 
 This document records implementation details and technical decisions for maintainers. End-user setup belongs in the root `README.md`.
 
+For source-backed Copilot/Responses API findings, see `docs/copilot-provider-responses-api-flow.md`. That document should be updated whenever provider behavior is rechecked against VS Code/Copilot or OpenAI official sources.
+
 ## Provider Surface
 
 The extension registers one VS Code language model provider:
@@ -42,17 +44,30 @@ Inline `profiles[].apiKey` remains available as a fallback for local or disposab
 
 ## URL Resolution
 
-`baseUrl` accepts either a host root or a full endpoint URL.
+`baseUrl` follows VS Code Custom Endpoint URL resolution for the `responses` API type.
 
-If the configured URL has no meaningful path, the extension appends:
+If the configured URL already contains `/responses`, `/chat/completions`, or `/messages`, it is treated as an explicit API endpoint URL and used as configured.
+
+Otherwise the extension appends the Responses path the same way as VS Code's `resolveCustomEndpointUrl`:
 
 ```text
-/v1/responses
+<base>/v1/responses
 ```
 
-If the configured URL includes a path, it is used exactly as configured. This supports relay services that mount OpenAI-compatible APIs under an extra path segment.
+If the URL already ends in a version segment such as `/v1` or `/v2`, only `/responses` is appended.
 
 The same rule applies to profile-level and model-level `baseUrl`.
+
+## Request Headers
+
+Profile-level auth follows VS Code Custom Endpoint behavior when `apiKeyHeader` is omitted:
+
+- URLs containing `openai.azure` use `api-key: <key>`.
+- Other URLs use `Authorization: Bearer <key>`.
+
+Profile `extraHeaders` are static non-auth headers and are sanitized with reserved/unsafe header names blocked.
+
+Model `requestHeaders` mirrors the Custom Endpoint `requestHeaders` capability. It uses the same header sanitizer but permits `authorization` and `api-key` as explicit auth overrides, suppresses the inferred profile auth when a well-known auth header is present, and replaces `${apiKey}` with the profile API key.
 
 ## Request Transport
 
@@ -94,9 +109,29 @@ Requests are built in this order:
 provider defaults -> global requestBodyOverrides -> profile requestBodyOverrides -> model extraBody -> modelOptions -> patches
 ```
 
+After merges, compatibility handling removes fields that the official BYOK path also removes or gates:
+
+- `n` and `stream_options` are removed for Responses requests;
+- `reasoning` and `include` are removed unless the model has `thinking: true`;
+- `temperature` is removed when `thinking: true`;
+- `previous_response_id` is removed for ZDR, non-Responses ids, and explicit retry/full-history cases;
+- empty `tools` and orphaned `tool_choice` are removed.
+
 `patch.dropTruncation` runs after all body fields have been merged. It deletes the top-level `truncation` field only when a model explicitly enables it.
 
 The default for `dropTruncation` is `false` so the extension does not change request semantics unless the user opts in.
+
+## Reasoning Effort
+
+When a model declares `supportsReasoningEffort`, the extension contributes `configurationSchema.properties.reasoningEffort` so VS Code/Copilot can pass the native Thinking Effort selection as `options.modelConfiguration.reasoningEffort`. Omit the property to disable the picker. Set it to `[]` to use the provider default five levels: `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values.
+
+Request priority is:
+
+```text
+modelConfiguration.reasoningEffort -> modelOptions.reasoningEffort -> modelOptions.reasoning.effort -> model.reasoningEffort -> defaultReasoningEffort -> preferred family default -> first advertised level
+```
+
+The final body scrubs any preexisting effort first, then writes either nested `reasoning.effort` or top-level `reasoning_effort` according to `reasoningEffortFormat`.
 
 ## Internal Data Parts
 

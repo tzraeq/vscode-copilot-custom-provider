@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/tzraeq/vscode-copilot-custom-provider.git"
   },
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "tzraeq",
   "license": "MIT",
   "homepage": "https://github.com/tzraeq/vscode-copilot-custom-provider",
@@ -15,7 +15,7 @@
       "url": "https://github.com/tzraeq/vscode-copilot-custom-provider/issues"
   },
   "engines": {
-    "vscode": "^1.106.0"
+    "vscode": "^1.121.0"
   },
   "categories": [
     "AI"
@@ -73,6 +73,13 @@
                       "toolCalling": true,
                       "vision": true,
                       "reasoningEffort": "medium",
+                      "supportsReasoningEffort": [
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                      ],
                       "patch": {
                         "dropTruncation": false
                       }
@@ -90,6 +97,13 @@
                       "toolCalling": true,
                       "vision": true,
                       "reasoningEffort": "medium",
+                      "supportsReasoningEffort": [
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                      ],
                       "patch": {
                         "dropTruncation": false
                       }
@@ -118,7 +132,7 @@
               },
               "baseUrl": {
                 "type": "string",
-                "markdownDescription": "Base URL for this profile, for example `https://host-a.example.com` or `https://host-a.example.com:8443`. If the URL has no path, requests are sent to `/v1/responses` automatically. If you include a path, for example `https://host-a.example.com/proxy/v1/responses`, it is used exactly as configured."
+                "markdownDescription": "Base URL for this profile, for example `https://host-a.example.com`, `https://host-a.example.com/v1`, or `https://host-a.example.com/proxy`. URLs without an explicit API path get `/v1/responses` appended, matching VS Code Custom Endpoint URL resolution for `responses`."
               },
               "apiKey": {
                 "type": "string",
@@ -131,13 +145,12 @@
               },
               "apiKeyHeader": {
                 "type": "string",
-                "default": "Authorization",
-                "description": "Header name used for this profile's API key."
+                "description": "Optional profile-level API key header override. When omitted, the provider follows VS Code Custom Endpoint behavior: `api-key` for URLs containing `openai.azure`, otherwise `Authorization`."
               },
               "apiKeyPrefix": {
                 "type": "string",
                 "default": "Bearer ",
-                "markdownDescription": "Prefix prepended to this profile's API key header value. Use `Bearer ` for OpenAI-compatible services, or an empty string for raw key headers."
+                "markdownDescription": "Prefix prepended when `apiKeyHeader` is explicitly set. Use `Bearer ` for bearer headers, or an empty string for raw key headers."
               },
               "extraHeaders": {
                 "type": "object",
@@ -169,7 +182,14 @@
                     "maxOutputTokens": 16384,
                     "toolCalling": true,
                     "vision": true,
-                    "reasoningEffort": "medium"
+                    "reasoningEffort": "medium",
+                    "supportsReasoningEffort": [
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
                   }
                 ],
                 "markdownDescription": "Models exposed for this profile. `id` and `apiModel` are upstream model identifiers and can repeat across profiles. The VS Code/Copilot id defaults to `profileId/modelId`.",
@@ -230,16 +250,46 @@
                       "type": "boolean",
                       "description": "Advertise image input support."
                     },
+                    "thinking": {
+                      "type": "boolean",
+                      "default": false,
+                      "markdownDescription": "Advertise thinking/reasoning metadata support for this model. When `true`, Responses requests include `reasoning.encrypted_content` and encrypted reasoning items are round-tripped."
+                    },
+                    "streaming": {
+                      "type": "boolean",
+                      "markdownDescription": "Whether this model supports streaming. Set `false` to send `stream: false` even when global streaming is enabled."
+                    },
+                    "editTools": {
+                      "type": "array",
+                      "markdownDescription": "Edit tool preference hints exposed through VS Code's language model capabilities, aligned with VS Code BYOK `editTools`.",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "find-replace",
+                          "multi-find-replace",
+                          "apply-patch",
+                          "code-rewrite"
+                        ]
+                      }
+                    },
                     "reasoningEffort": {
                       "type": "string",
+                      "markdownDescription": "Fallback reasoning effort injected into Responses API requests for this model. The value is not restricted by this schema; when `supportsReasoningEffort` is set, use one of that model's advertised levels."
+                    },
+                    "supportsReasoningEffort": {
+                      "type": "array",
+                      "markdownDescription": "Reasoning effort levels the model accepts, for example `[\"minimal\", \"low\", \"medium\", \"high\", \"xhigh\"]`. Omit this property to disable the native Thinking Effort picker. Set it to `[]` to use the provider default five levels. Set a non-empty array to use those exact picker values. When set, the provider contributes a `configurationSchema.properties.reasoningEffort` entry so VS Code/Copilot can show the native picker and pass the selected value as `options.modelConfiguration.reasoningEffort`.",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "reasoningEffortFormat": {
+                      "type": "string",
                       "enum": [
-                        "minimal",
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh"
+                        "responses",
+                        "chat-completions"
                       ],
-                      "description": "Reasoning effort injected into Responses API requests for this model."
+                      "markdownDescription": "Body shape used for reasoning effort. `responses` writes nested `reasoning.effort`; `chat-completions` writes top-level `reasoning_effort`."
                     },
                     "temperature": {
                       "type": "number",
@@ -272,6 +322,13 @@
                       },
                       "markdownDescription": "Responses endpoints supported by this model, aligned with VS Code Custom Endpoint metadata. Include `ws:/responses` to send requests over Responses WebSocket v2; otherwise the extension uses HTTP/SSE `/responses`."
                     },
+                    "requestHeaders": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "markdownDescription": "Model-level request headers, aligned with VS Code Custom Endpoint `requestHeaders`. `authorization` and `api-key` can override the default auth header; `${apiKey}` is replaced with the profile API key."
+                    },
                     "extraBody": {
                       "type": "object",
                       "additionalProperties": true,
@@ -301,15 +358,8 @@
         "copilotCustomProvider.defaultReasoningEffort": {
           "type": "string",
           "default": "medium",
-          "enum": [
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ],
           "scope": "resource",
-          "description": "Reasoning effort used when a model does not define its own reasoningEffort."
+          "description": "Reasoning effort used for model display/name fallback. Request bodies only use it for models that advertise supportsReasoningEffort and do not set reasoningEffort."
         },
         "copilotCustomProvider.requestTimeoutMs": {
           "type": "number",
@@ -374,6 +424,9 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "enabledApiProposals": [
+    "chatProvider"
+  ],
   "main": "./dist/extension.js",
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
@@ -383,7 +436,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
-    "@types/vscode": "^1.106.0",
+    "@types/vscode": "^1.120.0",
     "@vscode/vsce": "^3.9.1",
     "typescript": "^6.0.3"
   }

@@ -12,10 +12,26 @@ const webSocketResponsesEndpoint = 'ws:/responses';
 const contextManagementCompactionType = 'compaction';
 const toolSearchReservedName = 'tool_search';
 const modelsWithoutResponsesContextManagement = new Set(['gpt-5', 'gpt-5.1', 'gpt-5.2']);
+const defaultReasoningEffortLevels = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 
-type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+type ReasoningEffort = string;
 type LogLevel = 'off' | 'info' | 'debug';
 type ModelSupportedEndpoint = typeof responsesEndpoint | typeof webSocketResponsesEndpoint;
+type ReasoningEffortFormat = 'responses' | 'chat-completions';
+type EndpointEditToolName = 'find-replace' | 'multi-find-replace' | 'apply-patch' | 'code-rewrite';
+type TextVerbosity = 'low' | 'medium' | 'high';
+
+interface LanguageModelConfigurationSchemaLike {
+	readonly properties?: Record<string, Record<string, unknown>>;
+}
+
+interface LanguageModelChatCapabilitiesWithEditTools extends vscode.LanguageModelChatCapabilities {
+	readonly editTools?: EndpointEditToolName[];
+}
+
+interface ProvideLanguageModelChatResponseOptionsWithConfiguration extends vscode.ProvideLanguageModelChatResponseOptions {
+	readonly modelConfiguration?: Record<string, unknown>;
+}
 
 type LanguageModelThinkingPartLike = {
 	readonly value?: string | string[];
@@ -39,11 +55,17 @@ interface ModelConfig {
 	maxOutputTokens?: number;
 	toolCalling?: boolean | number;
 	vision?: boolean;
+	thinking?: boolean;
+	streaming?: boolean;
+	editTools?: EndpointEditToolName[];
 	reasoningEffort?: ReasoningEffort;
+	supportsReasoningEffort?: string[];
+	reasoningEffortFormat?: ReasoningEffortFormat;
 	temperature?: number;
 	topP?: number;
 	zeroDataRetentionEnabled?: boolean;
 	supportedEndpoints?: ModelSupportedEndpoint[];
+	requestHeaders?: Record<string, string>;
 	extraBody?: Record<string, unknown>;
 	patch?: ModelPatchConfig;
 }
@@ -83,6 +105,7 @@ interface SelectedModelConfig {
 
 interface CustomLanguageModel extends vscode.LanguageModelChatInformation {
 	readonly isUserSelectable?: boolean;
+	readonly configurationSchema?: LanguageModelConfigurationSchemaLike;
 	readonly config: SelectedModelConfig;
 }
 
@@ -98,10 +121,15 @@ interface ResponsesRequestBody {
 	top_logprobs?: number;
 	context_management?: ResponsesContextManagementRequest[];
 	reasoning?: {
-		effort: ReasoningEffort;
+		effort?: string;
+		summary?: string;
 	};
+	reasoning_effort?: string;
 	temperature?: number;
 	top_p?: number;
+	text?: {
+		verbosity?: TextVerbosity;
+	};
 	tools?: ResponsesTool[];
 	tool_choice?: 'auto' | 'required' | { type: 'function'; name: string };
 	[key: string]: unknown;
@@ -411,7 +439,7 @@ class CustomOpenAIResponsesProvider implements vscode.LanguageModelChatProvider<
 			throw new Error(`Missing API key for profile "${profile.id}". Run "Custom OpenAI Responses: Set API Key".`);
 		}
 
-		const headers = buildHeaders(profile);
+		const headers = buildHeaders(profile, model.config.model, requestUrl);
 		const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 		const useWebSocket = shouldUseWebSocketResponsesApi(model.config.model);
 
@@ -941,7 +969,10 @@ function toLanguageModelInformation(
 	config: ExtensionConfig,
 	seenProviderModelIds?: Set<string>
 ): CustomLanguageModel {
-	const effort = normalizeReasoningEffort(model.reasoningEffort, config.defaultReasoningEffort);
+	const supportedReasoningEfforts = normalizeReasoningEffortLevels(model.supportsReasoningEffort);
+	const effort = supportedReasoningEfforts.length > 0
+		? pickDefaultReasoningEffort(supportedReasoningEfforts, model.reasoningEffort ?? config.defaultReasoningEffort, model.family || model.id) ?? normalizeReasoningEffort(model.reasoningEffort, config.defaultReasoningEffort)
+		: normalizeReasoningEffort(model.reasoningEffort, config.defaultReasoningEffort);
 	const baseUrl = model.baseUrl || profile.baseUrl;
 	const requestUrl = resolveResponsesRequestUrl(baseUrl);
 	const displayModelName = formatModelName(profile, model, effort, baseUrl, config.modelNameTemplate);
@@ -962,7 +993,7 @@ function toLanguageModelInformation(
 	}
 	const tooltip = formatModelTooltip(tooltipLines);
 
-	return {
+	const info: CustomLanguageModel = {
 		id: providerModelId,
 		name: displayModelName,
 		family: model.family || model.id,
@@ -973,13 +1004,25 @@ function toLanguageModelInformation(
 		tooltip,
 		capabilities: {
 			imageInput: Boolean(model.vision),
-			toolCalling: model.toolCalling ?? false
-		},
+			toolCalling: model.toolCalling ?? false,
+			editTools: model.editTools
+		} as LanguageModelChatCapabilitiesWithEditTools,
 		config: {
 			profileId: profile.id,
 			profileName: profile.name,
 			providerModelId,
 			model
+		}
+	};
+	if (supportedReasoningEfforts.length === 0) {
+		return info;
+	}
+	return {
+		...info,
+		configurationSchema: {
+			properties: {
+				reasoningEffort: buildReasoningEffortSchemaProperty(supportedReasoningEfforts, effort, info.family)
+			}
 		}
 	};
 }
@@ -1012,6 +1055,58 @@ function formatModelTooltip(lines: string[]): string {
 	return lines.join(' | ');
 }
 
+function buildReasoningEffortSchemaProperty(
+	effortLevels: readonly string[],
+	configuredDefault: string | undefined,
+	family: string
+): Record<string, unknown> {
+	return {
+		type: 'string',
+		title: 'Thinking Effort',
+		enum: effortLevels,
+		enumItemLabels: effortLevels.map((level) => level.charAt(0).toUpperCase() + level.slice(1)),
+		enumDescriptions: effortLevels.map(reasoningEffortDescription),
+		default: pickDefaultReasoningEffort(effortLevels, configuredDefault, family),
+		group: 'navigation'
+	};
+}
+
+function pickDefaultReasoningEffort(
+	effortLevels: readonly string[],
+	configuredDefault: string | undefined,
+	family: string
+): string | undefined {
+	if (effortLevels.length === 0) {
+		return undefined;
+	}
+	if (configuredDefault && effortLevels.includes(configuredDefault)) {
+		return configuredDefault;
+	}
+	const preferred = family.toLowerCase().startsWith('claude') ? 'high' : 'medium';
+	return effortLevels.includes(preferred) ? preferred : effortLevels[0];
+}
+
+function reasoningEffortDescription(level: string): string {
+	switch (level) {
+		case 'none':
+			return 'No reasoning applied';
+		case 'minimal':
+			return 'Minimal reasoning for fastest responses';
+		case 'low':
+			return 'Faster responses with less reasoning';
+		case 'medium':
+			return 'Balanced reasoning and speed';
+		case 'high':
+			return 'Greater reasoning depth but slower';
+		case 'xhigh':
+			return 'Highest reasoning depth but slowest';
+		case 'max':
+			return 'Absolute maximum capability with no constraints';
+		default:
+			return level;
+	}
+}
+
 function buildResponsesRequestBody(
 	model: CustomLanguageModel,
 	profile: ProviderProfileConfig,
@@ -1021,11 +1116,9 @@ function buildResponsesRequestBody(
 	stateOptions: ResponsesRequestStateOptions
 ): ResponsesRequestBody {
 	const modelOptions = normalizeObject(options.modelOptions);
+	const modelConfiguration = normalizeObject((options as ProvideLanguageModelChatResponseOptionsWithConfiguration).modelConfiguration);
 	const modelConfig = model.config.model;
-	const effort = normalizeReasoningEffort(
-		readNestedString(modelOptions, ['reasoningEffort']) ?? readNestedString(modelOptions, ['reasoning', 'effort']) ?? modelConfig.reasoningEffort,
-		config.defaultReasoningEffort
-	);
+	const effort = resolveRequestReasoningEffort(modelOptions, modelConfiguration, modelConfig, config.defaultReasoningEffort);
 	const maxOutputTokens = normalizePositiveNumber(
 		readNestedNumber(modelOptions, ['maxOutputTokens']) ?? readNestedNumber(modelOptions, ['max_output_tokens']) ?? modelConfig.maxOutputTokens,
 		model.maxOutputTokens
@@ -1035,13 +1128,18 @@ function buildResponsesRequestBody(
 	const body: ResponsesRequestBody = {
 		model: apiModel,
 		...toResponsesInput(messages, [model.config.providerModelId, apiModel], stateOptions),
-		stream: config.enableStreaming,
+		stream: config.enableStreaming && modelConfig.streaming !== false,
 		max_output_tokens: maxOutputTokens,
 		store: !modelConfig.zeroDataRetentionEnabled,
-		truncation: 'disabled',
-		include: ['reasoning.encrypted_content'],
-		reasoning: { effort }
+		truncation: 'disabled'
 	};
+	if (modelConfig.thinking) {
+		body.include = ['reasoning.encrypted_content'];
+	}
+	const verbosity = getResponsesTextVerbosity(modelConfig);
+	if (verbosity) {
+		body.text = { verbosity };
+	}
 	const contextManagement = toResponsesContextManagement(modelConfig, model.maxInputTokens);
 	if (contextManagement) {
 		body.context_management = [contextManagement];
@@ -1086,8 +1184,15 @@ function buildResponsesRequestBody(
 	return applyResponsesRequestCompatibility(bodyWithOverrides, {
 		allowPreviousResponseId: stateOptions.allowPreviousResponseId,
 		zeroDataRetentionEnabled: Boolean(modelConfig.zeroDataRetentionEnabled),
+		modelConfig,
+		reasoningEffort: effort,
 		patch: modelConfig.patch
 	});
+}
+
+function getResponsesTextVerbosity(modelConfig: ModelConfig): TextVerbosity | undefined {
+	const family = (modelConfig.family || modelConfig.id).toLowerCase();
+	return family === 'gpt-5.1' || family === 'gpt-5-mini' ? 'low' : undefined;
 }
 
 function toResponsesContextManagement(
@@ -1420,17 +1525,45 @@ function normalizeToolParameters(parameters: object | undefined): object {
 	return parameters;
 }
 
-function buildHeaders(profile: ProviderProfileConfig): Record<string, string> {
+function buildHeaders(profile: ProviderProfileConfig, model: ModelConfig, requestUrl: string): Record<string, string> {
+	const modelHeaders = sanitizeRequestHeaders(model.requestHeaders);
+	const userSuppliedAuth = hasUserAuthHeader(modelHeaders);
+	const auth = resolveProfileApiKeyAuth(profile, requestUrl);
 	const headers: Record<string, string> = {
 		'content-type': 'application/json',
 		...sanitizeExtraHeaders(profile.extraHeaders)
 	};
 
-	if (profile.apiKey) {
-		headers[profile.apiKeyHeader] = `${profile.apiKeyPrefix}${profile.apiKey}`;
+	if (profile.apiKey && !userSuppliedAuth) {
+		headers[auth.header] = `${auth.prefix}${profile.apiKey}`;
+	}
+	for (const [key, value] of Object.entries(modelHeaders)) {
+		headers[key] = interpolateApiKey(value, profile.apiKey);
 	}
 
 	return headers;
+}
+
+function resolveProfileApiKeyAuth(
+	profile: ProviderProfileConfig,
+	requestUrl: string
+): { header: string; prefix: string } {
+	if (profile.apiKeyHeader) {
+		return {
+			header: profile.apiKeyHeader,
+			prefix: profile.apiKeyPrefix
+		};
+	}
+	if (requestUrl.includes('openai.azure')) {
+		return {
+			header: 'api-key',
+			prefix: ''
+		};
+	}
+	return {
+		header: 'Authorization',
+		prefix: 'Bearer '
+	};
 }
 
 const reservedExtraHeaderNames = new Set([
@@ -1465,8 +1598,18 @@ const reservedExtraHeaderNames = new Set([
 ]);
 
 const validHeaderNamePattern = /^[!#$%&'*+\-.0-9A-Z^_`a-z|~]+$/;
+const overridableRequestAuthHeaderNames = new Set(['api-key', 'authorization']);
+const userAuthHeaderSuppressionNames = new Set(['api-key', 'authorization', 'x-api-key', 'x-goog-api-key', 'apikey']);
 
 function sanitizeExtraHeaders(headers: Record<string, string>): Record<string, string> {
+	return sanitizeHeaders(headers, false);
+}
+
+function sanitizeRequestHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+	return sanitizeHeaders(headers ?? {}, true);
+}
+
+function sanitizeHeaders(headers: Record<string, string>, allowAuthHeaders: boolean): Record<string, string> {
 	const sanitized: Record<string, string> = {};
 	let count = 0;
 
@@ -1477,7 +1620,7 @@ function sanitizeExtraHeaders(headers: Record<string, string>): Record<string, s
 
 		const name = rawName.trim();
 		const value = sanitizeHeaderValue(rawValue);
-		if (value === undefined || !isAllowedExtraHeaderName(name, value)) {
+		if (value === undefined || !isAllowedHeaderName(name, value, allowAuthHeaders)) {
 			continue;
 		}
 
@@ -1488,16 +1631,24 @@ function sanitizeExtraHeaders(headers: Record<string, string>): Record<string, s
 	return sanitized;
 }
 
-function isAllowedExtraHeaderName(name: string, value: string): boolean {
+function isAllowedHeaderName(name: string, value: string, allowAuthHeaders: boolean): boolean {
 	if (!name || name.length > 256 || !validHeaderNamePattern.test(name)) {
 		return false;
 	}
 
 	const lower = name.toLowerCase();
+	if (allowAuthHeaders && overridableRequestAuthHeaderNames.has(lower)) {
+		return true;
+	}
+
+	const blockedAuthHeader = lower === 'api-key'
+		|| lower === 'openai-api-key'
+		|| lower === 'x-api-key'
+		|| lower === 'x-goog-api-key'
+		|| lower === 'apikey';
+
 	return !reservedExtraHeaderNames.has(lower)
-		&& lower !== 'api-key'
-		&& lower !== 'openai-api-key'
-		&& lower !== 'x-api-key'
+		&& (!blockedAuthHeader || allowAuthHeaders)
 		&& lower !== 'x-github-api-version'
 		&& lower !== 'x-initiator'
 		&& lower !== 'x-interaction-id'
@@ -1508,6 +1659,14 @@ function isAllowedExtraHeaderName(name: string, value: string): boolean {
 		&& !lower.startsWith('proxy-')
 		&& !lower.startsWith('sec-')
 		&& !isForbiddenHttpMethodOverrideHeader(lower, value);
+}
+
+function hasUserAuthHeader(headers: Record<string, string>): boolean {
+	return Object.keys(headers).some((key) => userAuthHeaderSuppressionNames.has(key.toLowerCase()));
+}
+
+function interpolateApiKey(value: string, apiKey: string): string {
+	return value.includes('${apiKey}') ? value.split('${apiKey}').join(apiKey) : value;
 }
 
 function isForbiddenHttpMethodOverrideHeader(lowerName: string, value: string): boolean {
@@ -3050,7 +3209,7 @@ function normalizeProfiles(
 			baseUrl: trim(profile.baseUrl),
 			apiKey: trim(profile.apiKey),
 			requireApiKey: readBoolean(profile.requireApiKey, true),
-			apiKeyHeader: trim(profile.apiKeyHeader) || 'Authorization',
+			apiKeyHeader: trim(profile.apiKeyHeader),
 			apiKeyPrefix: typeof profile.apiKeyPrefix === 'string' ? profile.apiKeyPrefix : 'Bearer ',
 			extraHeaders: normalizeStringRecord(profile.extraHeaders as Record<string, unknown> | undefined),
 			requestBodyOverrides: normalizeObject(profile.requestBodyOverrides),
@@ -3088,6 +3247,8 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 			toolCalling: true,
 			vision: true,
 			reasoningEffort: 'medium',
+			supportsReasoningEffort: [...defaultReasoningEffortLevels],
+			streaming: true,
 			zeroDataRetentionEnabled: false,
 			supportedEndpoints: [responsesEndpoint],
 			patch: {
@@ -3119,13 +3280,41 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 				maxOutputTokens: normalizePositiveNumber(model.maxOutputTokens, 16384),
 				toolCalling: model.toolCalling ?? false,
 				vision: Boolean(model.vision),
-				reasoningEffort: normalizeReasoningEffort(model.reasoningEffort, 'medium'),
+				thinking: readBoolean(model.thinking, false),
+				streaming: typeof model.streaming === 'boolean' ? model.streaming : undefined,
+				editTools: normalizeEditTools(model.editTools),
+				reasoningEffort: normalizeOptionalReasoningEffort(model.reasoningEffort),
+				supportsReasoningEffort: normalizeOptionalReasoningEffortLevels(model.supportsReasoningEffort),
+				reasoningEffortFormat: normalizeReasoningEffortFormat(model.reasoningEffortFormat),
 				zeroDataRetentionEnabled: readBoolean(model.zeroDataRetentionEnabled, false),
 				supportedEndpoints: normalizeSupportedEndpoints(model.supportedEndpoints),
+				requestHeaders: normalizeStringRecord(model.requestHeaders as Record<string, unknown> | undefined),
 				extraBody: normalizeObject(model.extraBody),
 				patch: normalizeModelPatch(model.patch)
 			};
 		});
+}
+
+function normalizeEditTools(value: unknown): EndpointEditToolName[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const seen = new Set<EndpointEditToolName>();
+	const tools: EndpointEditToolName[] = [];
+	for (const entry of value) {
+		if (entry !== 'find-replace' && entry !== 'multi-find-replace' && entry !== 'apply-patch' && entry !== 'code-rewrite') {
+			continue;
+		}
+		if (!seen.has(entry)) {
+			seen.add(entry);
+			tools.push(entry);
+		}
+	}
+	return tools.length > 0 ? tools : undefined;
+}
+
+function normalizeReasoningEffortFormat(value: unknown): ReasoningEffortFormat | undefined {
+	return value === 'responses' || value === 'chat-completions' ? value : undefined;
 }
 
 function normalizeSupportedEndpoints(value: unknown): ModelSupportedEndpoint[] {
@@ -3163,10 +3352,64 @@ function normalizeObject(value: unknown): Record<string, unknown> {
 	return isRecord(value) ? value : {};
 }
 
+function normalizeReasoningEffortLevels(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const seen = new Set<string>();
+	const levels: string[] = [];
+	for (const entry of value) {
+		if (typeof entry !== 'string') {
+			continue;
+		}
+		const level = entry.trim();
+		if (!level || seen.has(level)) {
+			continue;
+		}
+		seen.add(level);
+		levels.push(level);
+	}
+	return levels;
+}
+
+function normalizeOptionalReasoningEffortLevels(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	const levels = normalizeReasoningEffortLevels(value);
+	return levels.length > 0 ? levels : [...defaultReasoningEffortLevels];
+}
+
 function normalizeReasoningEffort(value: unknown, fallback: ReasoningEffort): ReasoningEffort {
-	return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
-		? value
-		: fallback;
+	return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeOptionalReasoningEffort(value: unknown): ReasoningEffort | undefined {
+	return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function resolveRequestReasoningEffort(
+	modelOptions: Record<string, unknown>,
+	modelConfiguration: Record<string, unknown>,
+	modelConfig: ModelConfig,
+	defaultReasoningEffort: string
+): string | undefined {
+	const supported = normalizeReasoningEffortLevels(modelConfig.supportsReasoningEffort);
+	const requested = readNestedString(modelConfiguration, ['reasoningEffort'])
+		?? readNestedString(modelOptions, ['reasoningEffort'])
+		?? readNestedString(modelOptions, ['reasoning', 'effort'])
+		?? readNestedString(modelOptions, ['reasoning_effort']);
+	if (supported.length > 0) {
+		if (requested) {
+			return supported.includes(requested) ? requested : undefined;
+		}
+		return pickDefaultReasoningEffort(
+			supported,
+			modelConfig.reasoningEffort ?? defaultReasoningEffort,
+			modelConfig.family || modelConfig.id
+		);
+	}
+	return normalizeOptionalReasoningEffort(requested ?? modelConfig.reasoningEffort);
 }
 
 function normalizePositiveNumber(value: unknown, fallback: number): number {
@@ -3199,19 +3442,18 @@ function resolveResponsesRequestUrl(baseUrl: string): string {
 		return '';
 	}
 
-	try {
-		const url = new URL(rawBaseUrl);
-		const hasSubPath = url.pathname.length > 0 && url.pathname !== '/';
-		if (hasSubPath) {
-			return rawBaseUrl;
-		}
-
-		url.pathname = '/v1/responses';
-		url.hash = '';
-		return url.toString();
-	} catch {
+	if (hasExplicitResponsesApiPath(rawBaseUrl)) {
 		return rawBaseUrl;
 	}
+
+	const normalizedBaseUrl = rawBaseUrl.endsWith('/') ? rawBaseUrl.slice(0, -1) : rawBaseUrl;
+	return /\/v\d+$/.test(normalizedBaseUrl)
+		? `${normalizedBaseUrl}/responses`
+		: `${normalizedBaseUrl}/v1/responses`;
+}
+
+function hasExplicitResponsesApiPath(url: string): boolean {
+	return url.includes('/responses') || url.includes('/chat/completions') || url.includes('/messages');
 }
 
 function resolveResponsesWebSocketUrl(requestUrl: string): string {
@@ -3279,6 +3521,17 @@ function mergeObjects(...objects: Array<Record<string, unknown>>): Record<string
 function sanitizeModelOptions(modelOptions: Record<string, unknown>): Record<string, unknown> {
 	const sanitized = { ...modelOptions };
 	delete sanitized.reasoningEffort;
+	const reasoning = asRecord(sanitized.reasoning);
+	if (reasoning) {
+		const { effort: _effort, ...rest } = reasoning;
+		if (Object.keys(rest).length > 0) {
+			sanitized.reasoning = rest;
+		} else {
+			delete sanitized.reasoning;
+		}
+	} else {
+		delete sanitized.reasoning;
+	}
 	delete sanitized.max_output_tokens;
 	delete sanitized.maxOutputTokens;
 	delete sanitized.top_p;
@@ -3291,11 +3544,24 @@ function applyResponsesRequestCompatibility(
 	options: {
 		allowPreviousResponseId: boolean;
 		zeroDataRetentionEnabled: boolean;
+		modelConfig: ModelConfig;
+		reasoningEffort: string | undefined;
 		patch: ModelPatchConfig | undefined;
 	}
 ): ResponsesRequestBody {
 	delete body.n;
 	delete body.stream_options;
+	if (!options.modelConfig.thinking) {
+		delete body.reasoning;
+		delete body.include;
+	}
+	applyResponsesReasoningEffort(body, options.modelConfig, options.reasoningEffort);
+	if (options.modelConfig.thinking) {
+		delete body.temperature;
+	}
+	if (!options.modelConfig.toolCalling) {
+		delete body.tools;
+	}
 	if (Array.isArray(body.tools) && body.tools.length === 0) {
 		delete body.tools;
 	}
@@ -3317,6 +3583,33 @@ function applyResponsesRequestCompatibility(
 		delete body.truncation;
 	}
 	return body;
+}
+
+function applyResponsesReasoningEffort(
+	body: ResponsesRequestBody,
+	modelConfig: ModelConfig,
+	requested: string | undefined
+): void {
+	const supported = normalizeReasoningEffortLevels(modelConfig.supportsReasoningEffort);
+	const hasNativeReasoningEffort = supported.length > 0;
+	const effort = hasNativeReasoningEffort
+		? requested && supported.includes(requested) ? requested : undefined
+		: requested;
+
+	if (body.reasoning) {
+		const { effort: _drop, ...rest } = body.reasoning;
+		body.reasoning = Object.keys(rest).length > 0 ? rest : undefined;
+	}
+	delete body.reasoning_effort;
+
+	if (!effort) {
+		return;
+	}
+	if ((modelConfig.reasoningEffortFormat ?? 'responses') === 'chat-completions') {
+		body.reasoning_effort = effort;
+		return;
+	}
+	body.reasoning = { ...body.reasoning, effort };
 }
 
 function readNestedString(object: Record<string, unknown>, path: string[]): string | undefined {
