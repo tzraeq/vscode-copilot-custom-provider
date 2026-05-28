@@ -13,7 +13,7 @@
 当前基线：
 
 - 扩展 API 基线：公开 VS Code `LanguageModelChatProvider` / `registerLanguageModelChatProvider` 能力。
-- 运行版本基线：仓库当前 `package.json` 要求 VS Code `^1.121.0` 和 `chatProvider` API。
+- 运行版本基线：仓库当前 `package.json` 要求 VS Code `^1.121.0`；不声明 `enabledApiProposals`，发布 Marketplace 不需要 proposed API 开关。
 - 非目标：替换 GitHub Copilot 内置模型、拦截 GitHub CAPI、依赖 Insiders-only Custom Endpoint UI、兼容 legacy `customOAI` 配置形状。
 - API 路线：固定面向 OpenAI Responses API compatible endpoint，不在本扩展内同时实现 Chat Completions 或 Messages provider。
 - 配置路线：保留本扩展 settings-based multi-profile 配置。
@@ -112,10 +112,10 @@ Copilot Chat / Agent
 
 模型 ID 分两层：
 
-- `providerId`：VS Code/Copilot 看到的 provider 内唯一模型 ID，默认 `<profile id>/<model id>`。
-- `id` / `apiModel`：发送给上游 Responses API 的模型 ID，可以在不同 profile 中重复。
+- `id`：该 profile 下暴露的模型 ID；VS Code/Copilot 最终看到 `<profile id>/<model id>`。
+- `apiModel`：发送给上游 Responses API 的模型 ID；不配置时默认使用 `id`。
 
-这个分层是必要的，因为 VS Code 要求同一个 provider 内的模型 ID 唯一，但多个 endpoint 经常暴露相同上游模型名。
+这个分层是必要的，因为 VS Code 要求同一个 provider 内的模型 ID 唯一，但多个 endpoint 经常暴露相同上游模型名。同一个上游模型需要在一个 profile 下暴露多次时，应使用不同 `id` 指向同一个 `apiModel`。
 
 ## URL 解析
 

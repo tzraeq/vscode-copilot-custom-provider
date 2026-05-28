@@ -3,6 +3,9 @@ node_modules/**
 .vscode/**
 .history/**
 logs/**
+docs/checklists/**
+docs/prompts/**
+!docs/README.md
 *.vsix
 tsconfig.json
 package-lock.json

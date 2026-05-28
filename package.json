@@ -407,9 +407,6 @@
   "activationEvents": [
     "onStartupFinished"
   ],
-  "enabledApiProposals": [
-    "chatProvider"
-  ],
   "main": "./dist/extension.js",
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",

@@ -8,7 +8,7 @@ VS Code also documents a built-in Custom Endpoint/BYOK path for compatible third
 
 ## Requirements
 
-- VS Code `1.121.0` or newer with the `chatProvider` API available.
+- VS Code `1.121.0` or newer. No proposed API flag is required.
 - One or more services compatible with the OpenAI Responses API.
 
 ## Quick Setup
