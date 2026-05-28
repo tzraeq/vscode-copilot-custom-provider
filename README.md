@@ -36,8 +36,8 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           }
         },
         {
-          "id": "gpt-5.5",
-          "providerId": "host-a/gpt-5.5-high",
+          "id": "gpt-5.5-high",
+          "apiModel": "gpt-5.5",
           "name": "GPT-5.5 High",
           "toolCalling": true,
           "vision": true,
@@ -120,12 +120,11 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `id` | Yes | - | Upstream model id sent as `model` when `apiModel` is not set. May repeat across profiles. |
-| `providerId` | No | `<profile id>/<model id>` | Unique VS Code/Copilot model id. Set this when one profile exposes the same `id` more than once. |
-| `apiModel` | No | `id` | Actual model value sent to the Responses API request. |
+| `id` | Yes | - | Model id exposed under this profile. VS Code/Copilot sees `<profile id>/<model id>`. Sent as the Responses API `model` only when `apiModel` is not set. |
+| `apiModel` | No | `id` | Actual model value sent to the Responses API request. Use this when the exposed model id should differ from the upstream model id. |
 | `name` | No | `id` | Base display name. Used as `${modelName}` in `modelNameTemplate`. |
 | `baseUrl` | No | profile `baseUrl` | Per-model base URL or full Responses API URL override. Uses the same automatic `/v1/responses` rule, profile key, and headers. |
-| `family` | No | `id` | Model family advertised to VS Code. |
+| `family` | No | `apiModel` or `id` | Model family advertised to VS Code. |
 | `version` | No | `1` | Model version advertised to VS Code. |
 | `maxInputTokens` | No | `128000` | Input token budget advertised to VS Code. |
 | `maxOutputTokens` | No | `16384` | Output token budget advertised and sent as `max_output_tokens`. |
@@ -185,7 +184,14 @@ They appear to VS Code as `host-a/gpt-5.5` and `host-b/gpt-5.5`, while each serv
 { "model": "gpt-5.5" }
 ```
 
-If one profile exposes the same upstream model multiple times, set different `providerId` values.
+If one profile exposes the same upstream model multiple times, give each picker entry a different `id` and point them at the same `apiModel`:
+
+```json
+[
+  { "id": "gpt-5.5-medium", "apiModel": "gpt-5.5", "reasoningEffort": "medium" },
+  { "id": "gpt-5.5-high", "apiModel": "gpt-5.5", "reasoningEffort": "high" }
+]
+```
 
 ## Reasoning Effort
 

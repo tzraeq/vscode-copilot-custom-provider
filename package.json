@@ -175,7 +175,7 @@
                     "reasoningEffort": "medium"
                   }
                 ],
-                "markdownDescription": "Models exposed for this profile. `id` and `apiModel` are upstream model identifiers and can repeat across profiles. The VS Code/Copilot id defaults to `profileId/modelId`.",
+                "markdownDescription": "Models exposed for this profile. `id` is the model id exposed under the profile, while `apiModel` is the upstream Responses API model value. The VS Code/Copilot id is `profileId/modelId`, so the same `apiModel` can be exposed more than once by giving each entry a different `id`.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -185,15 +185,11 @@
                   "properties": {
                     "id": {
                       "type": "string",
-                      "description": "Upstream model id. Sent to the Responses API when apiModel is omitted."
-                    },
-                    "providerId": {
-                      "type": "string",
-                      "markdownDescription": "Optional unique id exposed to VS Code/Copilot. Defaults to `profileId/modelId`. Use this only when you need a custom stable picker id."
+                      "markdownDescription": "Model id exposed under this profile. The VS Code/Copilot id is `profileId/modelId`. Sent to the Responses API only when `apiModel` is omitted."
                     },
                     "apiModel": {
                       "type": "string",
-                      "description": "Model id sent to the Responses API. Defaults to id."
+                      "description": "Actual model value sent to the Responses API. Defaults to id."
                     },
                     "name": {
                       "type": "string",

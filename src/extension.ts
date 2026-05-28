@@ -48,8 +48,7 @@ interface ModelPatchConfig {
 
 interface ModelConfig {
 	id: string;
-	providerId?: string;
-	apiModel?: string;
+	apiModel: string;
 	name?: string;
 	baseUrl?: string;
 	family?: string;
@@ -984,7 +983,7 @@ function toLanguageModelInformation(
 	const requestUrl = resolveResponsesRequestUrl(baseUrl);
 	const displayModelName = formatModelName(profile, model, effort, baseUrl, config.modelNameTemplate);
 
-	const preferredProviderModelId = model.providerId || buildProviderModelId(profile.id, model.id);
+	const preferredProviderModelId = buildProviderModelId(profile.id, model.id);
 	const providerModelId = seenProviderModelIds
 		? uniqueId(preferredProviderModelId, seenProviderModelIds)
 		: preferredProviderModelId;
@@ -1047,7 +1046,7 @@ function formatModelName(
 		profileName: profile.name,
 		modelId: model.id,
 		modelName,
-		apiModel: model.apiModel || model.id,
+		apiModel: model.apiModel,
 		reasoningEffort: effort,
 		baseUrlHost: baseUrl ? hostnameOrUrl(baseUrl) : ''
 	};
@@ -1131,7 +1130,7 @@ function buildResponsesRequestBody(
 		model.maxOutputTokens
 	);
 
-	const apiModel = modelConfig.apiModel || modelConfig.id;
+	const apiModel = modelConfig.apiModel;
 	const body: ResponsesRequestBody = {
 		model: apiModel,
 		...toResponsesInput(messages, [model.config.providerModelId, apiModel], stateOptions),
@@ -3248,7 +3247,6 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 	if (!Array.isArray(models) || models.length === 0) {
 		return [{
 			id: 'gpt-5',
-			providerId: buildProviderModelId(profileId, 'gpt-5'),
 			apiModel: 'gpt-5',
 			name: 'GPT-5 Custom',
 			family: 'gpt-5',
@@ -3270,24 +3268,18 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 		}];
 	}
 
-	const seenProviderIds = new Set<string>();
 	return models
 		.filter((model) => isRecord(model) && typeof model.id === 'string')
 		.map((model) => {
-			const upstreamId = model.id.trim();
-			const configuredProviderId = trim(model.providerId);
-			const providerId = uniqueId(
-				configuredProviderId || buildProviderModelId(profileId, upstreamId),
-				seenProviderIds
-			);
+			const modelId = model.id.trim();
+			const apiModel = trim(model.apiModel) || modelId;
 			return {
 				...model,
-				id: upstreamId,
-				providerId,
-				apiModel: trim(model.apiModel) || upstreamId,
-				name: typeof model.name === 'string' && model.name.trim() ? model.name.trim() : upstreamId,
+				id: modelId,
+				apiModel,
+				name: typeof model.name === 'string' && model.name.trim() ? model.name.trim() : modelId,
 				baseUrl: trim(model.baseUrl),
-				family: trim(model.family) || upstreamId,
+				family: trim(model.family) || apiModel,
 				version: trim(model.version) || '1',
 				maxInputTokens: normalizePositiveNumber(model.maxInputTokens, 128000),
 				maxOutputTokens: normalizePositiveNumber(model.maxOutputTokens, 16384),
@@ -3511,8 +3503,7 @@ function toResponsesWebSocketCreateMessage(body: ResponsesRequestBody): Record<s
 }
 
 function responseStateModelIds(model: CustomLanguageModel): string[] {
-	const apiModel = model.config.model.apiModel || model.config.model.id;
-	return [model.config.providerModelId, apiModel];
+	return [model.config.providerModelId, model.config.model.apiModel];
 }
 
 function hostnameOrUrl(urlValue: string): string {
