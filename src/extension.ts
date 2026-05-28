@@ -3520,24 +3520,12 @@ function mergeObjects(...objects: Array<Record<string, unknown>>): Record<string
 }
 
 function sanitizeModelOptions(modelOptions: Record<string, unknown>): Record<string, unknown> {
-	const sanitized = { ...modelOptions };
-	delete sanitized.reasoningEffort;
-	const reasoning = asRecord(sanitized.reasoning);
-	if (reasoning) {
-		const { effort: _effort, ...rest } = reasoning;
-		if (Object.keys(rest).length > 0) {
-			sanitized.reasoning = rest;
-		} else {
-			delete sanitized.reasoning;
+	const sanitized: Record<string, unknown> = {};
+	for (const key of ['metadata', 'parallel_tool_calls', 'prompt_cache_key', 'safety_identifier', 'service_tier']) {
+		if (key in modelOptions) {
+			sanitized[key] = modelOptions[key];
 		}
-	} else {
-		delete sanitized.reasoning;
 	}
-	delete sanitized.reasoning_effort;
-	delete sanitized.max_output_tokens;
-	delete sanitized.maxOutputTokens;
-	delete sanitized.top_p;
-	delete sanitized.topP;
 	return sanitized;
 }
 
