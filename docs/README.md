@@ -58,7 +58,7 @@
 | --- | --- | --- |
 | 公开 provider 接入 | 已实现 | 使用 `contributes.languageModelChatProviders` 和 `vscode.lm.registerLanguageModelChatProvider` 暴露自定义模型。 |
 | 第三方 Responses endpoint | 已实现 | 固定面向 OpenAI Responses API compatible 服务；`apiType` 不暴露，默认就是 Responses 路线。 |
-| 常见 model 字段 | 基本覆盖 | 本扩展覆盖 `id`、`name`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。内置 Custom Endpoint 的 `url` 在本扩展中对应 `baseUrl`。 |
+| 常见 model 字段 | 基本覆盖 | 本扩展覆盖 `id`、`name`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`requestHeaders`。内置 Custom Endpoint 的 `url` 在本扩展中对应 `baseUrl`；`reasoningEffortFormat` 因本扩展固定 Responses 路线而不暴露。 |
 | Custom Endpoint 三 API type | 目标外 | 官方内置 Custom Endpoint 支持 `chat-completions`、`responses`、`messages`；本扩展当前只做 Responses-compatible 服务。 |
 | URL 解析 | 已实现 | `baseUrl` 自动补全到 `/responses` 或 `/v1/responses`，并识别显式 `/responses`、`/chat/completions`、`/messages` 路径。 |
 | Thinking Effort picker | 已实现 | 走 `configurationSchema.properties.reasoningEffort` 和 `options.modelConfiguration.reasoningEffort`。本扩展是 Responses-only provider，省略 `supportsReasoningEffort` 或配置为 `[]` 都会展开默认五档；这是本扩展便利规则，不是官方公开契约。 |
@@ -156,6 +156,7 @@ provider defaults
 Responses 兼容处理原则：
 
 - 删除 Responses 路径不应带出的 `n` 和 `stream_options`。
+- 删除非 Responses 路径遗留的 `max_tokens`。
 - 非 thinking 模型删除 `reasoning` 和 `include`。
 - thinking 模型删除 `temperature`。
 - ZDR、非 `resp_` marker、显式 full-history retry 时删除 `previous_response_id`。
@@ -170,8 +171,7 @@ Responses 兼容处理原则：
 
 - 每个 Responses model 默认贡献 `configurationSchema.properties.reasoningEffort`。
 - Copilot UI 的 Thinking Effort picker 选择值会进入 `options.modelConfiguration.reasoningEffort`。
-- 默认写入 Responses body 的位置是 `reasoning.effort`。
-- 当 `reasoningEffortFormat` 为 `chat-completions` 时，写入顶层 `reasoning_effort`。
+- 写入 Responses body 的位置固定是 `reasoning.effort`。
 
 本扩展的 Responses-only 默认规则：
 
@@ -185,7 +185,6 @@ Responses 兼容处理原则：
 options.modelConfiguration.reasoningEffort
 -> options.modelOptions.reasoningEffort
 -> options.modelOptions.reasoning.effort
--> options.modelOptions.reasoning_effort
 -> model.reasoningEffort
 -> global defaultReasoningEffort
 -> family preferred default

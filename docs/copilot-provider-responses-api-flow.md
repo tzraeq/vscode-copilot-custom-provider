@@ -314,9 +314,9 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 - 当前结论：本扩展已经基本覆盖公开 `LanguageModelChatProvider` 路线下连接第三方 OpenAI Responses-compatible endpoint 的主路径能力。它不是官方 Custom Endpoint/BYOK Responses 路径的字节级/行为级复刻；源码级内部能力记录为差异，见“与内置实现的差异”。
 - `profiles[].models[].supportsReasoningEffort` 声明可接受 levels，并启用 picker schema；这个 settings 数组就是 Copilot Thinking Effort UI 的枚举来源。本扩展是 Responses-only provider，因此额外提供配置便利规则：省略该属性或显式配置 `[]` 都会展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`；非空数组按配置原样作为 picker enum。
 - `profiles[].models[].reasoningEffort` 作为 model fallback effort。0.8.0 起不再限制为固定五档字符串；只要 endpoint 接受，并且值在 `supportsReasoningEffort` 中，就可以显示在 UI 并写入请求体。
-- 请求优先级：`options.modelConfiguration.reasoningEffort` -> `options.modelOptions.reasoningEffort` -> `options.modelOptions.reasoning.effort` -> `options.modelOptions.reasoning_effort` -> model `reasoningEffort`。
+- 请求优先级：`options.modelConfiguration.reasoningEffort` -> `options.modelOptions.reasoningEffort` -> `options.modelOptions.reasoning.effort` -> model `reasoningEffort`。
 - 当没有 request value 时，默认值按 `model.reasoningEffort` -> `defaultReasoningEffort` -> family preferred default -> first advertised level 选择，且必须在 advertised supported levels 中。
-- Responses 请求默认按以下形状发送 resolved effort：
+- 因本扩展固定面向 Responses-compatible endpoint，resolved effort 始终按以下形状发送：
 
 ```json
 {
@@ -326,7 +326,6 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 }
 ```
 
-- 如果 `reasoningEffortFormat` 为 `chat-completions`，provider 写入 top-level `reasoning_effort`。
 - `thinking: true` 控制 `include: ["reasoning.encrypted_content"]`、encrypted reasoning round-trip 和 temperature removal。
 - `streaming: false` 强制 `stream: false`。
 - `editTools` 作为 public language model capability hint 暴露。

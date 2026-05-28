@@ -232,7 +232,7 @@
                     "thinking": {
                       "type": "boolean",
                       "default": false,
-                      "markdownDescription": "Advertise thinking/reasoning metadata support for this model. When `true`, Responses requests include `reasoning.encrypted_content` and encrypted reasoning items are round-tripped."
+                      "markdownDescription": "Advertise thinking/reasoning metadata support for this model. When `true`, Responses requests include `reasoning.encrypted_content`, encrypted reasoning items are round-tripped, and `temperature` is removed from the final request body."
                     },
                     "streaming": {
                       "type": "boolean",
@@ -262,19 +262,11 @@
                         "type": "string"
                       }
                     },
-                    "reasoningEffortFormat": {
-                      "type": "string",
-                      "enum": [
-                        "responses",
-                        "chat-completions"
-                      ],
-                      "markdownDescription": "Body shape used for reasoning effort. `responses` writes nested `reasoning.effort`; `chat-completions` writes top-level `reasoning_effort`."
-                    },
                     "temperature": {
                       "type": "number",
                       "minimum": 0,
                       "maximum": 2,
-                      "description": "Optional temperature sent to the Responses API request."
+                      "description": "Optional temperature sent to the Responses API request. Removed for thinking models."
                     },
                     "topP": {
                       "type": "number",

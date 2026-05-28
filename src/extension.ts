@@ -17,7 +17,6 @@ const defaultReasoningEffortLevels = ['minimal', 'low', 'medium', 'high', 'xhigh
 type ReasoningEffort = string;
 type LogLevel = 'off' | 'info' | 'debug';
 type ModelSupportedEndpoint = typeof responsesEndpoint | typeof webSocketResponsesEndpoint;
-type ReasoningEffortFormat = 'responses' | 'chat-completions';
 type EndpointEditToolName = 'find-replace' | 'multi-find-replace' | 'apply-patch' | 'code-rewrite';
 type TextVerbosity = 'low' | 'medium' | 'high';
 
@@ -60,7 +59,6 @@ interface ModelConfig {
 	editTools?: EndpointEditToolName[];
 	reasoningEffort?: ReasoningEffort;
 	supportsReasoningEffort?: string[];
-	reasoningEffortFormat?: ReasoningEffortFormat;
 	temperature?: number;
 	topP?: number;
 	zeroDataRetentionEnabled?: boolean;
@@ -124,7 +122,6 @@ interface ResponsesRequestBody {
 		effort?: string;
 		summary?: string;
 	};
-	reasoning_effort?: string;
 	temperature?: number;
 	top_p?: number;
 	text?: {
@@ -3295,7 +3292,6 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 				editTools: normalizeEditTools(model.editTools),
 				reasoningEffort: normalizeOptionalReasoningEffort(model.reasoningEffort),
 				supportsReasoningEffort: normalizeConfiguredReasoningEffortLevels(model.supportsReasoningEffort),
-				reasoningEffortFormat: normalizeReasoningEffortFormat(model.reasoningEffortFormat),
 				zeroDataRetentionEnabled: readBoolean(model.zeroDataRetentionEnabled, false),
 				supportedEndpoints: normalizeSupportedEndpoints(model.supportedEndpoints),
 				requestHeaders: normalizeStringRecord(model.requestHeaders as Record<string, unknown> | undefined),
@@ -3321,10 +3317,6 @@ function normalizeEditTools(value: unknown): EndpointEditToolName[] | undefined 
 		}
 	}
 	return tools.length > 0 ? tools : undefined;
-}
-
-function normalizeReasoningEffortFormat(value: unknown): ReasoningEffortFormat | undefined {
-	return value === 'responses' || value === 'chat-completions' ? value : undefined;
 }
 
 function normalizeSupportedEndpoints(value: unknown): ModelSupportedEndpoint[] {
@@ -3407,8 +3399,7 @@ function resolveRequestReasoningEffort(
 	const supported = normalizeReasoningEffortLevels(modelConfig.supportsReasoningEffort);
 	const requested = readNestedString(modelConfiguration, ['reasoningEffort'])
 		?? readNestedString(modelOptions, ['reasoningEffort'])
-		?? readNestedString(modelOptions, ['reasoning', 'effort'])
-		?? readNestedString(modelOptions, ['reasoning_effort']);
+		?? readNestedString(modelOptions, ['reasoning', 'effort']);
 	if (supported.length > 0) {
 		if (requested) {
 			return supported.includes(requested) ? requested : undefined;
@@ -3542,6 +3533,7 @@ function sanitizeModelOptions(modelOptions: Record<string, unknown>): Record<str
 	} else {
 		delete sanitized.reasoning;
 	}
+	delete sanitized.reasoning_effort;
 	delete sanitized.max_output_tokens;
 	delete sanitized.maxOutputTokens;
 	delete sanitized.top_p;
@@ -3561,6 +3553,7 @@ function applyResponsesRequestCompatibility(
 ): ResponsesRequestBody {
 	delete body.n;
 	delete body.stream_options;
+	delete body.max_tokens;
 	if (!options.modelConfig.thinking) {
 		delete body.reasoning;
 		delete body.include;
@@ -3613,10 +3606,6 @@ function applyResponsesReasoningEffort(
 	delete body.reasoning_effort;
 
 	if (!effort) {
-		return;
-	}
-	if ((modelConfig.reasoningEffortFormat ?? 'responses') === 'chat-completions') {
-		body.reasoning_effort = effort;
 		return;
 	}
 	body.reasoning = { ...body.reasoning, effort };

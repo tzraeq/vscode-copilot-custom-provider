@@ -134,8 +134,7 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 | `editTools` | No | - | Edit tool hints exposed through VS Code model capabilities: `find-replace`, `multi-find-replace`, `apply-patch`, `code-rewrite`. |
 | `reasoningEffort` | No | unset | Preferred/default reasoning effort for this model. The value can be any string, but it is sent only if included in the model's advertised effort list. |
 | `supportsReasoningEffort` | No | default five levels | Reasoning effort levels accepted by the model. Because this provider is Responses-only, omit it or set `[]` to use the provider default five levels, or set a non-empty array to use those exact picker values. |
-| `reasoningEffortFormat` | No | `responses` | `responses` sends nested `reasoning.effort`; `chat-completions` sends top-level `reasoning_effort`. |
-| `temperature` | No | - | Sent as `temperature` when set. |
+| `temperature` | No | - | Sent as `temperature` when set. Removed from the final request body for thinking models, matching VS Code BYOK behavior. |
 | `topP` | No | - | Sent as `top_p` when set. |
 | `zeroDataRetentionEnabled` | No | `false` | Uses the common BYOK/Custom Endpoint field name. When `true`, `previous_response_id` is not sent and requests use `store: false`. |
 | `supportedEndpoints` | No | `["/responses"]` | Endpoint mode metadata for this extension. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
@@ -188,7 +187,7 @@ If one profile exposes the same upstream model multiple times, set different `pr
 
 ## Reasoning Effort
 
-This provider is Responses-only, so each configured model exposes Copilot's native Thinking Effort picker by default. Omit `supportsReasoningEffort` or set it to `[]` to use the provider default five levels, currently `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values. The selected value is received as `options.modelConfiguration.reasoningEffort` and sent to the Responses API as nested `reasoning.effort` by default.
+This provider is Responses-only, so each configured model exposes Copilot's native Thinking Effort picker by default. Omit `supportsReasoningEffort` or set it to `[]` to use the provider default five levels, currently `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values. The selected value is received as `options.modelConfiguration.reasoningEffort` and sent to the Responses API as nested `reasoning.effort`.
 
 Request priority is `options.modelConfiguration.reasoningEffort`, then `options.modelOptions.reasoningEffort`, then `options.modelOptions.reasoning.effort`, then model `reasoningEffort`. If no request value exists, the default is chosen from the advertised enum: model `reasoningEffort`, then global `defaultReasoningEffort`, then `high` for Claude families or `medium` for others, then the first advertised level.
 
