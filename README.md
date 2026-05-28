@@ -2,17 +2,13 @@
 
 Adds a VS Code language model provider named `Custom OpenAI Responses` for OpenAI **Responses API** compatible services.
 
-This extension does not replace or proxy GitHub Copilot's built-in models. It adds separate custom models to the VS Code/Copilot model picker.
+This extension uses VS Code's public `LanguageModelChatProvider` extension API. It does not replace or proxy GitHub Copilot's built-in models, and it is not the built-in Custom Endpoint provider. It adds separate custom models to the VS Code/Copilot model picker and sends requests to the endpoints you configure.
 
-VS Code Insiders already provides a built-in **Custom Endpoint** provider for BYOK models. It can configure Chat Completions, Responses, or Messages-compatible endpoints directly in Copilot Chat:
-
-https://code.visualstudio.com/updates/v1_121#_custom-endpoint-provider-for-byok-insiders
-
-The next development target for this extension is behavior parity with VS Code's built-in Custom Endpoint/BYOK provider for the Responses API path, while keeping request-body patches like `patch.dropTruncation` available for relay compatibility.
+VS Code also documents a built-in Custom Endpoint/BYOK path for compatible third-party endpoints. This extension does not target that implementation or require the built-in Custom Endpoint UI. Those docs are used only as a reference for common model capability names and Responses API conventions.
 
 ## Requirements
 
-- VS Code `1.121.0` or newer with the `chatProvider` proposed API available.
+- VS Code `1.121.0` or newer with the `chatProvider` API available.
 - One or more services compatible with the OpenAI Responses API.
 
 ## Quick Setup
@@ -76,7 +72,7 @@ This step is important. `settings.json` defines the profiles and models, but the
 
 ## Base URL
 
-`baseUrl` follows VS Code Custom Endpoint URL resolution for the `responses` API type:
+`baseUrl` is resolved to a Responses API URL:
 
 - `https://host-a.example.com`: requests are sent to `https://host-a.example.com/v1/responses`.
 - `https://host-a.example.com/v1`: requests are sent to `https://host-a.example.com/v1/responses`.
@@ -96,7 +92,7 @@ Keys should normally be set with `Custom OpenAI Responses: Set API Key`.
 - SecretStorage takes priority over inline `apiKey`.
 - Use `Custom OpenAI Responses: Clear API Key` to remove the stored key for one profile.
 
-When `apiKeyHeader` is omitted, requests follow VS Code Custom Endpoint's default auth selection:
+When `apiKeyHeader` is omitted, requests use common OpenAI/Azure auth defaults:
 
 - URLs containing `openai.azure` use `api-key: <key>`.
 - Other URLs use `Authorization: Bearer <key>`.
@@ -109,7 +105,7 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 | --- | --- | --- | --- |
 | `id` | Yes | - | Stable profile id. Used for SecretStorage and default model ids. Must be unique. |
 | `name` | No | `id` | Display name shown in model details and key prompts. |
-| `baseUrl` | Usually | - | Service base URL for this profile. Unless it already contains `/responses`, `/chat/completions`, or `/messages`, `/v1/responses` is appended using the same rule as VS Code Custom Endpoint. Can be omitted if every model has its own `baseUrl`. |
+| `baseUrl` | Usually | - | Service base URL for this profile. Unless it already contains `/responses`, `/chat/completions`, or `/messages`, `/v1/responses` is appended. Can be omitted if every model has its own `baseUrl`. |
 | `apiKey` | No | - | Inline key fallback. Prefer the Set API Key command. |
 | `requireApiKey` | No | `true` | Require a key when using this profile. Models still appear before a key is set. Set `false` for local/proxy endpoints that need no key. |
 | `apiKeyHeader` | No | inferred | Optional profile-level auth header override. When omitted, `openai.azure` URLs use `api-key`; other URLs use `Authorization`. |
@@ -141,9 +137,9 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 | `reasoningEffortFormat` | No | `responses` | `responses` sends nested `reasoning.effort`; `chat-completions` sends top-level `reasoning_effort`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
-| `zeroDataRetentionEnabled` | No | `false` | Matches VS Code Custom Endpoint naming. When `true`, `previous_response_id` is not sent and requests use `store: false`. |
-| `supportedEndpoints` | No | `["/responses"]` | Matches VS Code Custom Endpoint endpoint metadata. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
-| `requestHeaders` | No | `{}` | Model-level headers matching VS Code Custom Endpoint `requestHeaders`. Auth headers can override the inferred default, and `${apiKey}` is interpolated. |
+| `zeroDataRetentionEnabled` | No | `false` | Uses the common BYOK/Custom Endpoint field name. When `true`, `previous_response_id` is not sent and requests use `store: false`. |
+| `supportedEndpoints` | No | `["/responses"]` | Endpoint mode metadata for this extension. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
+| `requestHeaders` | No | `{}` | Model-level request headers. Auth headers can override the inferred default, and `${apiKey}` is interpolated. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
 | `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
 

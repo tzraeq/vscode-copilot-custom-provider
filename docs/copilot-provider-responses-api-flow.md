@@ -1,12 +1,12 @@
 # Copilot Provider Responses API 交互流程
 
-这份文档用于持续沉淀 VS Code/Copilot provider 行为的源码级结论。不要在这里加入无法从官方源码或官方 schema 追溯的实现细节。
+这份文档用于持续沉淀 VS Code/Copilot provider 行为的源码级结论。它是参考证据，不是本扩展必须复刻内置 Custom Endpoint/BYOK provider 的目标清单。不要在这里加入无法从官方源码或官方 schema 追溯的实现细节。
 
 核对日期：2026-05-28。
 
-## 源码基线
+## 源码参考基线
 
-- 版本断点：VS Code `1.121.0`，GitHub tag commit `987c959`。
+- 参考断点：VS Code `1.121.0`，GitHub tag commit `987c959`。该断点用于理解内置 Custom Endpoint/BYOK provider 引入时的源码行为，不作为本扩展的行为复刻目标。
 - VS Code 源码：`microsoft/vscode` commit `b62d3739a7fee78ddb51c6da8ab0308adac43c63`。
 - VS Code 使用的 Copilot API 客户端包：`@vscode/copilot-api@0.4.1`。
 - OpenAI API schema：`openai/openai-openapi` commit `5162af98d3147432c14680df789e8e12d4891e6b`。
@@ -38,9 +38,9 @@
 
 这些内容只能依据 VS Code/Copilot 源码继续核对，不能从公开文档本身推出。
 
-## 版本基线和断点
+## 参考断点和目标边界
 
-结论：本仓库从下一版开始选择 VS Code `1.121.0` 作为 Custom Endpoint/BYOK provider 行为基线，`1.121.0` 之前的 legacy `customOAI` / OpenAI Compatible provider 路线不再作为兼容目标。
+结论：VS Code `1.121.0` 是内置 Custom Endpoint/BYOK provider 的重要参考断点，但本仓库不再把“复刻 1.121.0 之后的内置 Custom Endpoint/BYOK provider”作为目标。本仓库目标是基于公开 `LanguageModelChatProvider` 扩展 API，连接用户配置的 OpenAI Responses-compatible endpoint。
 
 依据：
 
@@ -53,9 +53,9 @@
 实现含义：
 
 - 本扩展不再追求兼容 `customOAI` 旧配置形状。
-- 兼容目标收敛为 `1.121.0` 之后的官方 Custom Endpoint/BYOK provider，重点复刻 Responses API 路径。
-- `package.json` 的 `engines.vscode` 应不低于 `^1.121.0`。
-- 如果后续 VS Code/Copilot 对 Custom Endpoint provider 再发生新的不兼容更新，再把本节的断点前移，并把旧断点归档为历史依据。
+- 本扩展不依赖 VS Code Insiders 内置 Custom Endpoint UI，也不替换 GitHub Copilot 内置模型。
+- `package.json` 当前要求 VS Code `^1.121.0` 和 `chatProvider` API；这是扩展运行基线，不是内置 provider 行为复刻承诺。
+- 后续核对 VS Code/Copilot 源码时，要区分“公开 provider API 可以实现的目标”和“内置 provider/CAPI 私有行为参考”。
 
 ## 核心结论
 
@@ -113,7 +113,7 @@
 - 只在确认 stateful marker 是标准 Responses 返回的 `resp_...` 且非 ZDR 时发送 `previous_response_id`。
 - 请求 headers 不能沿用 CAPI headers 和 Copilot token；标准 endpoint 应使用该 endpoint 的 `Content-Type`、`Authorization`/`api-key` 或用户配置的 `requestHeaders`。
 
-本仓库目标：构造标准 Responses body，并在发送前应用与官方 BYOK 等价的兼容处理，而不是把 CAPI request 原样转发到用户 endpoint。
+本仓库目标：构造标准 Responses body，并在发送前应用适合公开 provider API 的兼容处理，而不是把 CAPI request 原样转发到用户 endpoint。BYOK 兼容处理是参考来源，不是字节级等价目标。
 
 ## Provider 所在层级
 
@@ -121,18 +121,17 @@
 flowchart TD
     A[Copilot Chat UI / Agent / 编辑器功能] --> B[VS Code Language Model 服务]
     B --> C[LanguageModelChatProvider / 模型选择信息]
-    C --> D[官方 CustomEndpointBYOKModelProvider]
-    D --> E[OpenAIEndpoint / ChatEndpoint]
-    E --> F[createResponsesRequestBody / responsesApi.ts]
-    F --> G[网络层 fetch / SSE / WebSocket]
-    G --> H[用户配置的 /v1/responses 兼容服务]
+    C --> D[本扩展 LanguageModelChatProvider]
+    D --> E[本扩展 Responses request adapter]
+    E --> F[网络层 fetch / SSE / WebSocket]
+    F --> G[用户配置的 /v1/responses 兼容服务]
 
     D -.提供.-> C1[模型列表、capabilities、configurationSchema]
     E -.应用.-> E1[ZDR、headers、reasoning effort、streaming、thinking]
-    F -.序列化.-> F1[input、tools、previous_response_id、include]
+    E -.序列化.-> E2[input、tools、previous_response_id、include]
 ```
 
-对本扩展来说，我们实现的是公开的 `LanguageModelChatProvider` 这一层。因此扩展收到的是 VS Code/Copilot 发来的 provider 请求，需要自己完成官方 `OpenAIEndpoint + responsesApi.ts` 那一段适配工作。
+对本扩展来说，我们实现的是公开的 `LanguageModelChatProvider` 这一层。因此扩展收到的是 VS Code/Copilot 发来的 provider 请求，需要自己完成 Responses API 适配。官方 `OpenAIEndpoint + responsesApi.ts` 是参考实现，不是必须等价复刻的内部模块。
 
 ## 官方内置模型请求链路 vs Provider 请求链路
 
@@ -208,7 +207,7 @@ chat-completions | responses | messages
 - Custom Endpoint model config 声明 `thinking`、`streaming`、`editTools`、`requestHeaders`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`：https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts#L89-L104
 - `ModelSupportedEndpoint` 包含 `/responses` 和 `ws:/responses`：https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/platform/endpoint/common/endpointProvider.ts#L75-L80
 
-本仓库目标：在 `profiles[].models[]` 暴露同样的 Responses 相关字段，并在公开 VS Code language model provider API 允许的范围内映射到模型能力。
+本仓库目标：在 `profiles[].models[]` 暴露常用 Responses 相关字段，并在公开 VS Code language model provider API 允许的范围内映射到模型能力。字段命名可参考内置 BYOK/Custom Endpoint，但配置形状以本扩展为准。
 
 ## 兼容字段影响
 
@@ -232,7 +231,7 @@ chat-completions | responses | messages
 - 如果用户 `requestHeaders` 含 `api-key`、`authorization`、`x-api-key`、`x-goog-api-key` 或 `apikey`，默认鉴权头会被抑制： https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts#L208-L222
 - Custom Endpoint 默认鉴权：URL 包含 `openai.azure` 时使用 `api-key`，否则使用 `Authorization: Bearer`；custom header value 中的 `${apiKey}` 会被替换成配置的 API key： https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/extension/byok/vscode-node/customEndpointProvider.ts#L251-L292
 
-本仓库目标：profile `extraHeaders` 保持为非鉴权静态 header；model `requestHeaders` 实现同样的鉴权覆盖、默认鉴权抑制、header sanitizer 和 `${apiKey}` 插值语义。
+本仓库目标：profile `extraHeaders` 保持为非鉴权静态 header；model `requestHeaders` 支持鉴权覆盖、默认鉴权抑制、header sanitizer 和 `${apiKey}` 插值语义。内置 Custom Endpoint 的 header 行为是参考来源。
 
 ## Responses Request Body
 
@@ -283,6 +282,19 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 
 结论：自定义 provider 在启用 proposed `chatProvider` API 时可以实现同样的 Thinking Effort picker 路径。本扩展作为 Responses-only provider，默认贡献 `configurationSchema.properties.reasoningEffort`；省略或空 `supportsReasoningEffort` 会使用默认五档，非空数组才覆盖 picker enum。请求时把 `options.modelConfiguration.reasoningEffort` 写入 `reasoning.effort`。
 
+### 启动时 Thinking Effort 值已显示但悬停 picker 暂不出现
+
+2026-05-28 在本机 VS Code Stable `1.121.0`（`product.json` commit `f6cfa2ea2403534de03f069bdf160d06451ed282`）打包源码中核对：
+
+- VS Code 的 language model service 通过 `_resolveAllLanguageModels(vendor, silent)` 激活 `onLanguageModelChatProvider:<vendor>`，调用 provider 的 `provideLanguageModelChatInfo`，并把返回的 `metadata.configurationSchema` 放入 live `_modelCache`。
+- `getModelConfigurationActions(modelId)` 只从 live `_modelCache.get(modelId)?.configurationSchema` 生成悬停/toolbar actions；只有 schema property 有 `enum` 且长度大于 1 才生成可选项。
+- 模型选择 UI 的行描述会读取模型 metadata 上 `configurationSchema.properties` 中 `group === "navigation"` 的 enum 当前值，并显示在模型行描述里。
+- Chat input 侧还会合并上次持久化的模型列表缓存；源码里有 `hasResolvedVendor(vendor)` 状态用于区分某个 vendor 是否已经被 live resolve。
+
+因此启动早期可能出现一个短暂状态：模型行已经来自上次缓存或已知 metadata，所以能显示当前 Thinking Effort；但 provider 还没有完成 live resolve，`_modelCache` 还没拿到对应 schema，`getModelConfigurationActions()` 返回空数组，悬停时就没有 Thinking Effort picker。等 language model provider resolve 完成、`onDidChangeLanguageModels` 触发重渲染后，picker 才会出现。
+
+本仓库判断：这不是 `supportsReasoningEffort` 归一化或 Responses 请求构造问题。当前实现一旦 `provideLanguageModelChatInformation()` 被调用，会同步返回包含 `configurationSchema.properties.reasoningEffort` 的模型信息。
+
 ## Tool Search
 
 内置 Responses 路径对 client-executed `tool_search` 协议有特殊处理。
@@ -299,7 +311,7 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 
 当前本仓库实现的映射：
 
-- 当前结论：不是 100% 字节级/行为级复刻官方 Custom Endpoint/BYOK Responses 路径。公开文档列出的 Responses 相关配置能力已基本覆盖；源码级内部能力仍有缺口，见“已知缺口”。
+- 当前结论：本扩展已经基本覆盖公开 `LanguageModelChatProvider` 路线下连接第三方 OpenAI Responses-compatible endpoint 的主路径能力。它不是官方 Custom Endpoint/BYOK Responses 路径的字节级/行为级复刻；源码级内部能力记录为差异，见“与内置实现的差异”。
 - `profiles[].models[].supportsReasoningEffort` 声明可接受 levels，并启用 picker schema；这个 settings 数组就是 Copilot Thinking Effort UI 的枚举来源。本扩展是 Responses-only provider，因此额外提供配置便利规则：省略该属性或显式配置 `[]` 都会展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`；非空数组按配置原样作为 picker enum。
 - `profiles[].models[].reasoningEffort` 作为 model fallback effort。0.8.0 起不再限制为固定五档字符串；只要 endpoint 接受，并且值在 `supportsReasoningEffort` 中，就可以显示在 UI 并写入请求体。
 - 请求优先级：`options.modelConfiguration.reasoningEffort` -> `options.modelOptions.reasoningEffort` -> `options.modelOptions.reasoning.effort` -> `options.modelOptions.reasoning_effort` -> model `reasoningEffort`。
@@ -320,20 +332,20 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 - `editTools` 作为 public language model capability hint 暴露。
 - model `requestHeaders` 可以覆盖 auth，并支持 `${apiKey}` 插值。
 
-## 已知缺口
+## 与内置实现的差异
 
 - 完整 client-executed `tool_search` deferral 尚未实现，因为公开 provider API 不暴露 Copilot 内部 `IToolDeferralService`。
 - `prompt_cache_key` 生成依赖内部 `conversationId` 和 experiment state；本仓库目前不能通过公开 provider request 拿到同等数据。
 - 官方 Responses processor 会处理 `response.reasoning_summary_text.delta` 和 `response.reasoning_summary_part.done`，并以 thinking progress 形式回传；本仓库当前只 round-trip encrypted reasoning item，没有完整展示 reasoning summary streaming events。
 - 官方 Responses processor 会把 `image_generation_call` 的 result 转成 image content；本仓库当前没有等价输出转换。
-- VS Code 内置路径包含内部 telemetry 和 content-filter 处理，本仓库没有完整复刻。
+- VS Code 内置路径包含内部 telemetry 和 content-filter 处理，本仓库不复刻。
 - 内置 provider 在一个 Custom Endpoint provider 中支持 Chat Completions、Responses、Messages。本扩展当前只面向 Responses-compatible 服务。
 
 ## 代理程序方案边界
 
 这里需要区分两类“代理”：
 
-1. **Custom Endpoint/BYOK 后面的本地适配代理**：VS Code provider 的 `url`/`baseUrl` 指向 `http://127.0.0.1:<port>/v1/responses`，本地代理再转发到真实模型服务。
+1. **本扩展后面的本地适配代理**：本扩展 profile/model 的 `baseUrl` 指向 `http://127.0.0.1:<port>/v1/responses`，本地代理再转发到真实模型服务。
 2. **拦截官方内置 Copilot/CAPI 网络流量的透明代理**：让官方内置模型请求先经过本地代理，再改写或转发。
 
 两者不是同一层。
@@ -353,11 +365,11 @@ flowchart TD
     F2 --> G2[GitHub 管理的模型后端]
 ```
 
-### Custom Endpoint 后置代理：可行且推荐
+### Responses 后置代理：可行且推荐
 
 这种方案把本扩展保留为“能力声明 + VS Code provider 接入层”，把复杂的协议转换、日志、网关鉴权、模型路由放到一个独立本地服务里。
 
-源码依据：
+内置 Custom Endpoint/BYOK 的源码依据可作为同类架构参考：
 
 - Custom Endpoint/BYOK 的 endpoint 目标是 URL 字符串，`networkRequest` 会走 `fetcher.fetch(endpoint.urlOrRequestMetadata, request)`：https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/platform/networking/common/networking.ts#L505-L519
 - BYOK `OpenAIEndpoint.urlOrRequestMetadata` 返回用户配置的 `_modelUrl`：https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/extension/byok/node/openAIEndpoint.ts#L356-L358
@@ -405,7 +417,7 @@ flowchart TD
 - 若要替换内置模型结果，还必须兼容 GitHub CAPI 的鉴权、模型列表、策略、响应流、错误格式和其他相关 endpoint，范围会超过“只代理 chat 请求”。
 - 这种拦截不是官方 BYOK/Custom Endpoint 路径，升级 VS Code 或 Copilot 客户端后更容易失效。
 
-结论：不要把“拦截官方内置 Copilot 请求”作为能力复刻主线。更稳的路线是：本扩展继续复刻官方 Custom Endpoint/BYOK provider 的能力声明和 request 构造；复杂的供应商适配下沉到一个本地代理程序。
+结论：不要把“拦截官方内置 Copilot 请求”作为主线。更稳的路线是：本扩展通过公开 `LanguageModelChatProvider` 暴露模型能力并构造 Responses request；复杂的供应商适配下沉到一个本地代理程序。
 
 ### 直接控制内置 CAPI 目标地址
 

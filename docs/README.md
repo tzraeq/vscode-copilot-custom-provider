@@ -2,33 +2,42 @@
 
 这份文档是维护者和后续开发会话的入口。用户安装、配置示例和常规使用说明放在根目录 `README.md`；官方源码核对、Responses API 调用链路和证据链接放在 `docs/copilot-provider-responses-api-flow.md`。
 
-后续重开会话时，先读本文件确认当前版本目标和实现边界，再读 `docs/copilot-provider-responses-api-flow.md` 核对官方依据。不要把没有官方源码或官方 schema 支撑的细节写成确定结论。
+后续重开会话时，先读本文件确认当前版本目标和实现边界，再读 `docs/copilot-provider-responses-api-flow.md` 核对官方依据。不要把 VS Code/Copilot 内部实现细节写成本扩展必须复刻的公开契约。
 
 ## 0.8.0 开发目标
 
-0.8.0 的目标不是“基本稳定可用”，而是尽量复刻 VS Code 内置 Custom Endpoint/BYOK provider 在 Responses API 路径上的能力，使自定义 provider 能完整适配 Copilot 对 provider 的调用。
+0.8.0 的目标是基于 VS Code 公开 `LanguageModelChatProvider` 扩展 API，提供一个稳定的 OpenAI Responses API compatible provider。它要能把用户配置的第三方 `/v1/responses` 兼容端点作为独立模型暴露给 VS Code/Copilot model picker。
+
+本扩展不以 VS Code Insiders 内置 Custom Endpoint/BYOK provider 为发布目标，也不承诺行为级复刻内置 provider。内置 Custom Endpoint/BYOK 文档和源码只作为参考：用于理解常见 model capability 命名、Responses request 形状、URL 约定和 ZDR/reasoning effort 等兼容语义。
 
 当前基线：
 
-- VS Code/Copilot 行为基线：VS Code `1.121.0` 之后的 Custom Endpoint/BYOK provider。
-- 不再兼容目标：`1.121.0` 之前 legacy `customOAI` / OpenAI Compatible provider 配置形状。
+- 扩展 API 基线：公开 VS Code `LanguageModelChatProvider` / `registerLanguageModelChatProvider` 能力。
+- 运行版本基线：仓库当前 `package.json` 要求 VS Code `^1.121.0` 和 `chatProvider` API。
+- 非目标：替换 GitHub Copilot 内置模型、拦截 GitHub CAPI、依赖 Insiders-only Custom Endpoint UI、兼容 legacy `customOAI` 配置形状。
 - API 路线：固定面向 OpenAI Responses API compatible endpoint，不在本扩展内同时实现 Chat Completions 或 Messages provider。
-- 配置路线：保留本扩展 settings-based multi-profile 配置，不改成官方 Custom Endpoint 的单模型 `url` 配置形状。
-- URL 行为：保留 `baseUrl` 自动补全能力，按官方 Custom Endpoint `responses` 路径规则解析到 `/v1/responses` 或 `/responses`。
-- 推理强度：使用官方 BYOK 风格的 `configurationSchema.properties.reasoningEffort` 暴露 Copilot 原生 Thinking Effort picker。
+- 配置路线：保留本扩展 settings-based multi-profile 配置。
+- URL 行为：保留 `baseUrl` 自动补全能力，解析到 `/v1/responses` 或 `/responses`。
+- 推理强度：通过 provider 返回的 `configurationSchema.properties.reasoningEffort` 暴露 Copilot 原生 Thinking Effort picker。
 
 实现优先级：
 
-1. 先对齐官方 Custom Endpoint/BYOK provider 的公开能力声明和 Responses request 构造。
-2. 再保留本扩展已经有价值的 settings 便利能力，例如 profiles、model-level `baseUrl`、SecretStorage key、`patch.dropTruncation`。
-3. 对官方没有公开入口的内部能力，只记录缺口，不臆造等价实现。
+1. 先保证公开 `LanguageModelChatProvider` 能力声明、请求构造、流式解析、工具调用和 token/usage 回传可用。
+2. 保留本扩展已经有价值的 settings 便利能力，例如 profiles、model-level `baseUrl`、SecretStorage key、`patch.dropTruncation`。
+3. 参考内置 Custom Endpoint/BYOK 的公开字段和源码行为时，只吸收适合公开 provider API 的部分；对内部能力只记录差异，不作为必须复刻的缺口。
 
-## 官方公开文档确认的契约
+## 官方公开文档确认的边界
 
-最近核对：2026-05-28。官方文档入口是 VS Code `AI language models in VS Code` 的 BYOK / Custom Endpoint / Model configuration reference 部分：https://code.visualstudio.com/docs/copilot/customization/language-models
+最近核对：2026-05-28。
+
+公开扩展 API 入口：
+
+- VS Code `LanguageModelChatProvider` / `registerLanguageModelChatProvider`：https://code.visualstudio.com/api/extension-guides/ai/language-model-chat-provider
+- VS Code `AI language models in VS Code` 的 BYOK / Custom Endpoint / Model configuration reference，可作为第三方 endpoint 配置能力参考：https://code.visualstudio.com/docs/copilot/customization/language-models
 
 公开文档能确认的点：
 
+- 扩展可以通过公开 provider API 注册自己的 language model provider，并把模型暴露给 VS Code/Copilot 的模型选择与 chat 调用链路。
 - BYOK 模型可以不登录 GitHub、没有 Copilot plan 使用；但 BYOK 只覆盖 chat experience 和 utility tasks。semantic search、inline suggestions/code completions、embeddings 这类依赖 GitHub Copilot 服务的能力不属于 BYOK 离线/自带 key 覆盖范围。
 - Custom Endpoint provider 替代 deprecated OpenAI Compatible provider；旧的 `github.copilot.chat.customOAIModels` setting 已废弃。
 - Custom Endpoint provider 支持三类 API type，并可按 model 选择：`chat-completions`、`responses`、`messages`。
@@ -39,29 +48,31 @@
 - `reasoningEffortFormat` 的公开行为是：`chat-completions` 写顶层 `reasoning_effort` 字符串，`responses` 写嵌套 `reasoning.effort` 对象；未设置时跟随 URL/API path。
 - `requestHeaders` 是发给该 model 的额外 HTTP headers；官方文档只说明 forbidden、forwarding、internal headers 会被忽略，详细 sanitizer 规则需要看源码。
 
-公开文档没有展开的点，例如 Responses body 精确字段、stateful marker 的 data part 形状、`tool_search` deferral、`prompt_cache_key`、WebSocket gate、header sanitizer 细节，都只能按 `docs/copilot-provider-responses-api-flow.md` 里的官方源码证据记录。
+公开文档没有展开的点，例如 Responses body 精确字段、stateful marker 的 data part 形状、`tool_search` deferral、`prompt_cache_key`、WebSocket gate、header sanitizer 细节，只能按 `docs/copilot-provider-responses-api-flow.md` 里的源码证据记录为参考或差异，不能自动升级成本扩展目标。
 
 ## 当前完成度结论
 
-结论：截至 2026-05-28，不能写成“100% 已实现 VS Code 内置 Custom Endpoint/BYOK provider 在 Responses API 路径上的所有能力”。更准确的说法是：官方公开文档列出的 Responses 路径配置能力已经基本覆盖；源码级完整行为仍有缺口，尤其是 `tool_search` deferral、`prompt_cache_key`、reasoning summary 流式展示，以及若干内部 experiment/CAPI/telemetry/content-filter 行为。
+结论：截至 2026-05-28，可以写成本扩展已经基本覆盖公开 provider API 下连接第三方 OpenAI Responses-compatible endpoint 所需的主路径能力。不能写成“100% 实现 VS Code 内置 Custom Endpoint/BYOK provider”，因为那不是目标，且其中包含内部 experiment/CAPI/telemetry/content-filter、`tool_search` deferral、`prompt_cache_key` 等公开扩展 API 无法等价获得的行为。
 
 | 能力面 | 当前状态 | 说明 |
 | --- | --- | --- |
-| 官方文档 model 字段 | 基本覆盖 | 本扩展覆盖 `id`、`name`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。`url` 在本扩展中对应 `baseUrl`；`apiType` 固定为 Responses 路线。 |
-| Custom Endpoint 三 API type | 目标外 | 官方整体 provider 支持 `chat-completions`、`responses`、`messages`；0.8.0 只复刻 Responses-compatible 路径。 |
+| 公开 provider 接入 | 已实现 | 使用 `contributes.languageModelChatProviders` 和 `vscode.lm.registerLanguageModelChatProvider` 暴露自定义模型。 |
+| 第三方 Responses endpoint | 已实现 | 固定面向 OpenAI Responses API compatible 服务；`apiType` 不暴露，默认就是 Responses 路线。 |
+| 常见 model 字段 | 基本覆盖 | 本扩展覆盖 `id`、`name`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。内置 Custom Endpoint 的 `url` 在本扩展中对应 `baseUrl`。 |
+| Custom Endpoint 三 API type | 目标外 | 官方内置 Custom Endpoint 支持 `chat-completions`、`responses`、`messages`；本扩展当前只做 Responses-compatible 服务。 |
 | URL 解析 | 已实现 | `baseUrl` 自动补全到 `/responses` 或 `/v1/responses`，并识别显式 `/responses`、`/chat/completions`、`/messages` 路径。 |
 | Thinking Effort picker | 已实现 | 走 `configurationSchema.properties.reasoningEffort` 和 `options.modelConfiguration.reasoningEffort`。本扩展是 Responses-only provider，省略 `supportsReasoningEffort` 或配置为 `[]` 都会展开默认五档；这是本扩展便利规则，不是官方公开契约。 |
 | ZDR/stateful | 已实现主要行为 | ZDR 时 `store: false`、不发送 `previous_response_id`、不回传 stateful marker；非 ZDR 支持 `resp_` marker 复用和历史裁剪。 |
 | Headers/auth | 基本覆盖 | model-level `requestHeaders` 支持 auth 覆盖和 `${apiKey}` 插值；profile-level `extraHeaders` 是本扩展附加能力。 |
-| Responses request body | 接近但非字节级一致 | 覆盖主要 Responses 字段和 BYOK 清理逻辑；内部 experiment 控制的 truncation、prompt cache、context management gate 不可能完全一致。 |
-| Streaming/response 解析 | 部分覆盖 | 文本、function tool call、usage、stateful marker、encrypted reasoning/context management round-trip 已覆盖；reasoning summary events 暂未作为 `LanguageModelThinkingPart` 进度展示，`image_generation_call` 输出也未做等价转换。 |
-| `tool_search` | 未完整实现 | 当前只把 `tool_search` 当保留 tool name，不作为普通 function tool 转发；官方完整 deferral 依赖内部 `IToolDeferralService`。 |
+| Responses request body | 已覆盖主路径 | 覆盖 `model`、`input`、streaming、tools、`max_output_tokens`、reasoning、ZDR、stateful marker、image input 和兼容清理。内部 experiment 控制的 prompt cache、context management gate 不作为目标。 |
+| Streaming/response 解析 | 基本覆盖 | 文本、function tool call、usage、stateful marker、encrypted reasoning/context management round-trip 已覆盖；reasoning summary events 和 `image_generation_call` 输出仍是可选增强。 |
+| `tool_search` | 非目标/保留处理 | 当前只把 `tool_search` 当保留 tool name，不作为普通 function tool 转发；官方完整 deferral 依赖 Copilot 内部 `IToolDeferralService`，不属于公开 provider API。 |
 
 ## 文档分工
 
 - `README.md`：面向使用者，说明怎么配置 profiles、models、API key、baseUrl、reasoning effort 和调试日志。
 - `docs/README.md`：面向开发者，记录版本目标、实现原则、方案分类和容易混淆的结论。
-- `docs/copilot-provider-responses-api-flow.md`：源码级证据文档。每次重新核对 VS Code/Copilot/OpenAI 官方来源，都应该把关键结论追加到这里。
+- `docs/copilot-provider-responses-api-flow.md`：源码级证据文档。每次重新核对 VS Code/Copilot/OpenAI 官方来源，都应该把关键结论追加到这里，并区分“公开 provider API 目标”和“内置实现参考”。
 - `CHANGELOG.md`：版本变更摘要，不承载完整设计推理。
 
 ## Provider 层级
@@ -108,17 +119,17 @@ Copilot Chat / Agent
 
 ## URL 解析
 
-`baseUrl` 不是简单字符串拼接，而是按官方 Custom Endpoint 的 Responses 路径规则处理：
+`baseUrl` 不是简单字符串拼接，而是按 Responses endpoint 习惯做自动补全：
 
 - URL 已包含 `/responses`、`/chat/completions` 或 `/messages`：视为显式 API endpoint，原样使用。
 - URL 以版本段结尾，例如 `/v1` 或 `/v2`：追加 `/responses`。
 - 其他 URL：追加 `/v1/responses`。
 
-同一规则适用于 profile-level `baseUrl` 和 model-level `baseUrl`。本扩展使用 `baseUrl` 字段，而官方 Custom Endpoint model config 使用 `url`；这属于配置字段名差异，不改变 Responses 请求目标语义。
+同一规则适用于 profile-level `baseUrl` 和 model-level `baseUrl`。本扩展使用 `baseUrl` 字段；内置 Custom Endpoint model config 使用 `url`，这里只把它作为参考口径。
 
 ## 鉴权和 Headers
 
-profile 默认鉴权跟随官方 Custom Endpoint 行为：
+profile 默认鉴权采用常见 OpenAI/Azure 约定：
 
 - URL 包含 `openai.azure`：使用 `api-key: <key>`。
 - 其他 URL：使用 `Authorization: Bearer <key>`。
@@ -126,7 +137,7 @@ profile 默认鉴权跟随官方 Custom Endpoint 行为：
 字段分工：
 
 - `extraHeaders`：profile-level 静态非鉴权 header，会过滤保留和不安全 header。
-- `requestHeaders`：model-level header，模拟官方 Custom Endpoint 的能力；允许显式覆盖 `authorization` 和 `api-key`，支持 `${apiKey}` 插值。
+- `requestHeaders`：model-level header；允许显式覆盖 `authorization` 和 `api-key`，支持 `${apiKey}` 插值。
 - 如果 `requestHeaders` 中出现常见鉴权 header，扩展会抑制默认鉴权 header，避免重复发送。
 
 ## Request Body 构造
@@ -151,11 +162,11 @@ Responses 兼容处理原则：
 - 空 `tools` 和孤立 `tool_choice` 会被清理。
 - `patch.dropTruncation` 只在模型显式开启时删除顶层 `truncation`，默认不改变官方语义。
 
-这部分目标是对齐官方 BYOK `OpenAIEndpoint.createRequestBody` 和 `interceptBody` 的 Responses 路径行为，而不是把 GitHub CAPI request 原样转发给用户 endpoint。
+这部分目标是生成标准 Responses-compatible request，而不是把 GitHub CAPI request 原样转发给用户 endpoint。内置 BYOK `OpenAIEndpoint.createRequestBody` 和 `interceptBody` 的 Responses 路径行为只作为兼容参考。
 
 ## Reasoning Effort
 
-推理强度要走官方 BYOK 风格能力声明，不靠自定义 UI：
+推理强度走 VS Code provider 的 `configurationSchema` 能力声明，不靠自定义 UI：
 
 - 每个 Responses model 默认贡献 `configurationSchema.properties.reasoningEffort`。
 - Copilot UI 的 Thinking Effort picker 选择值会进入 `options.modelConfiguration.reasoningEffort`。
@@ -246,11 +257,11 @@ Copilot 的 context usage 显示依赖 provider 回传 `mimeType: usage` 的 `La
 - `true`：声明工具能力。
 - number：声明工具能力，并表示可接受的最大工具数量。
 
-完整 `tool_search` 仍是已知缺口。官方内置 Responses 路径有 client-executed `tool_search` deferral 机制，但它依赖 Copilot 内部 `IToolDeferralService`，公开 provider API 目前不能等价取得这部分上下文。本扩展会把 `tool_search` 视为保留 tool name，避免误当普通 function tool 转发。
+完整 `tool_search` 不作为当前目标。官方内置 Responses 路径有 client-executed `tool_search` deferral 机制，但它依赖 Copilot 内部 `IToolDeferralService`，公开 provider API 目前不能等价取得这部分上下文。本扩展会把 `tool_search` 视为保留 tool name，避免误当普通 function tool 转发。
 
 ## 代理方案分类
 
-### 推荐：Custom Endpoint 后置代理
+### 推荐：Responses 后置代理
 
 让本扩展的 `baseUrl` 指向本地或远端适配代理，例如：
 
@@ -287,9 +298,9 @@ http://127.0.0.1:8787/v1/responses
 
 如果明确要调试 CAPI base URL，源码里存在 `github.copilot.advanced.debug.overrideCapiUrl`。这会改变 Copilot CAPI base URL，例如把 ChatResponses 发到 `<overrideCapiUrl>/responses`。这个结论已经记录在 `docs/copilot-provider-responses-api-flow.md`，但它不改变本扩展主线目标。
 
-## 已知缺口
+## 与内置实现的差异
 
-这些缺口不要在实现或文档里伪装成已完整复刻：
+这些差异不要在实现或文档里伪装成已完整复刻，也不要作为 0.8.0 必须完成的公开 API 目标：
 
 - 完整 client-executed `tool_search` deferral。
 - reasoning summary streaming events 到 Thinking progress 的等价展示。
