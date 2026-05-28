@@ -281,7 +281,7 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 - `OpenAIEndpoint._applyReasoningEffort` 从 model capabilities 读取每次请求的 selected value，并按 Responses API 写入 nested `reasoning.effort`，或按 Chat Completions 写入 top-level `reasoning_effort`；`reasoningEffortFormat` 可覆盖 body shape： https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/extensions/copilot/src/extension/byok/node/openAIEndpoint.ts#L286-L317
 - proposed `chatProvider` API 声明了 `LanguageModelChatInformation.configurationSchema` 和 `ProvideLanguageModelChatResponseOptions.modelConfiguration`： https://github.com/microsoft/vscode/blob/b62d3739a7fee78ddb51c6da8ab0308adac43c63/src/vscode-dts/vscode.proposed.chatProvider.d.ts#L13-L70
 
-结论：自定义 provider 在启用 proposed `chatProvider` API 时可以实现同样的 Thinking Effort picker 路径。本扩展在配置 `supportsReasoningEffort` 时贡献 `configurationSchema.properties.reasoningEffort`，并把 `options.modelConfiguration.reasoningEffort` 写入 `reasoning.effort`。
+结论：自定义 provider 在启用 proposed `chatProvider` API 时可以实现同样的 Thinking Effort picker 路径。本扩展作为 Responses-only provider，默认贡献 `configurationSchema.properties.reasoningEffort`；省略或空 `supportsReasoningEffort` 会使用默认五档，非空数组才覆盖 picker enum。请求时把 `options.modelConfiguration.reasoningEffort` 写入 `reasoning.effort`。
 
 ## Tool Search
 
@@ -300,11 +300,10 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 当前本仓库实现的映射：
 
 - 当前结论：不是 100% 字节级/行为级复刻官方 Custom Endpoint/BYOK Responses 路径。公开文档列出的 Responses 相关配置能力已基本覆盖；源码级内部能力仍有缺口，见“已知缺口”。
-- `profiles[].models[].supportsReasoningEffort` 声明可接受 levels，并启用 picker schema；这个 settings 数组就是 Copilot Thinking Effort UI 的枚举来源。本扩展额外提供配置便利规则：省略该属性表示不启用 picker；显式配置 `[]` 会展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`；非空数组按配置原样作为 picker enum。
+- `profiles[].models[].supportsReasoningEffort` 声明可接受 levels，并启用 picker schema；这个 settings 数组就是 Copilot Thinking Effort UI 的枚举来源。本扩展是 Responses-only provider，因此额外提供配置便利规则：省略该属性或显式配置 `[]` 都会展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`；非空数组按配置原样作为 picker enum。
 - `profiles[].models[].reasoningEffort` 作为 model fallback effort。0.8.0 起不再限制为固定五档字符串；只要 endpoint 接受，并且值在 `supportsReasoningEffort` 中，就可以显示在 UI 并写入请求体。
 - 请求优先级：`options.modelConfiguration.reasoningEffort` -> `options.modelOptions.reasoningEffort` -> `options.modelOptions.reasoning.effort` -> `options.modelOptions.reasoning_effort` -> model `reasoningEffort`。
-- 当存在 `supportsReasoningEffort` 且没有 request value 时，默认值按 `model.reasoningEffort` -> `defaultReasoningEffort` -> family preferred default -> first advertised level 选择，且必须在 advertised supported levels 中。
-- 当不存在 `supportsReasoningEffort` 时，只发送显式 request/model `reasoningEffort`；全局 `defaultReasoningEffort` 不注入 request body。
+- 当没有 request value 时，默认值按 `model.reasoningEffort` -> `defaultReasoningEffort` -> family preferred default -> first advertised level 选择，且必须在 advertised supported levels 中。
 - Responses 请求默认按以下形状发送 resolved effort：
 
 ```json

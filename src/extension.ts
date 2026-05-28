@@ -3294,7 +3294,7 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 				streaming: typeof model.streaming === 'boolean' ? model.streaming : undefined,
 				editTools: normalizeEditTools(model.editTools),
 				reasoningEffort: normalizeOptionalReasoningEffort(model.reasoningEffort),
-				supportsReasoningEffort: normalizeOptionalReasoningEffortLevels(model.supportsReasoningEffort),
+				supportsReasoningEffort: normalizeConfiguredReasoningEffortLevels(model.supportsReasoningEffort),
 				reasoningEffortFormat: normalizeReasoningEffortFormat(model.reasoningEffortFormat),
 				zeroDataRetentionEnabled: readBoolean(model.zeroDataRetentionEnabled, false),
 				supportedEndpoints: normalizeSupportedEndpoints(model.supportedEndpoints),
@@ -3382,9 +3382,9 @@ function normalizeReasoningEffortLevels(value: unknown): string[] {
 	return levels;
 }
 
-function normalizeOptionalReasoningEffortLevels(value: unknown): string[] | undefined {
+function normalizeConfiguredReasoningEffortLevels(value: unknown): string[] {
 	if (!Array.isArray(value)) {
-		return undefined;
+		return [...defaultReasoningEffortLevels];
 	}
 	const levels = normalizeReasoningEffortLevels(value);
 	return levels.length > 0 ? levels : [...defaultReasoningEffortLevels];

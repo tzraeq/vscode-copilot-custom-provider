@@ -73,13 +73,6 @@
                       "toolCalling": true,
                       "vision": true,
                       "reasoningEffort": "medium",
-                      "supportsReasoningEffort": [
-                        "minimal",
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh"
-                      ],
                       "patch": {
                         "dropTruncation": false
                       }
@@ -97,13 +90,6 @@
                       "toolCalling": true,
                       "vision": true,
                       "reasoningEffort": "medium",
-                      "supportsReasoningEffort": [
-                        "minimal",
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh"
-                      ],
                       "patch": {
                         "dropTruncation": false
                       }
@@ -182,14 +168,7 @@
                     "maxOutputTokens": 16384,
                     "toolCalling": true,
                     "vision": true,
-                    "reasoningEffort": "medium",
-                    "supportsReasoningEffort": [
-                      "minimal",
-                      "low",
-                      "medium",
-                      "high",
-                      "xhigh"
-                    ]
+                    "reasoningEffort": "medium"
                   }
                 ],
                 "markdownDescription": "Models exposed for this profile. `id` and `apiModel` are upstream model identifiers and can repeat across profiles. The VS Code/Copilot id defaults to `profileId/modelId`.",
@@ -274,11 +253,11 @@
                     },
                     "reasoningEffort": {
                       "type": "string",
-                      "markdownDescription": "Fallback reasoning effort injected into Responses API requests for this model. The value is not restricted by this schema; when `supportsReasoningEffort` is set, use one of that model's advertised levels."
+                      "markdownDescription": "Fallback reasoning effort injected into Responses API requests for this model. The value is not restricted by this schema; use one of this model's advertised `supportsReasoningEffort` levels. When `supportsReasoningEffort` is omitted or `[]`, the advertised levels default to `minimal`, `low`, `medium`, `high`, and `xhigh`."
                     },
                     "supportsReasoningEffort": {
                       "type": "array",
-                      "markdownDescription": "Reasoning effort levels the model accepts, for example `[\"minimal\", \"low\", \"medium\", \"high\", \"xhigh\"]`. Omit this property to disable the native Thinking Effort picker. Set it to `[]` to use the provider default five levels. Set a non-empty array to use those exact picker values. When set, the provider contributes a `configurationSchema.properties.reasoningEffort` entry so VS Code/Copilot can show the native picker and pass the selected value as `options.modelConfiguration.reasoningEffort`.",
+                      "markdownDescription": "Reasoning effort levels the model accepts, for example `[\"minimal\", \"low\", \"medium\", \"high\", \"xhigh\"]`. Because this provider is Responses-only, omitting this property or setting it to `[]` uses the provider default five levels. Set a non-empty array to use those exact picker values. The provider contributes a `configurationSchema.properties.reasoningEffort` entry so VS Code/Copilot can show the native picker and pass the selected value as `options.modelConfiguration.reasoningEffort`.",
                       "items": {
                         "type": "string"
                       }
@@ -359,7 +338,7 @@
           "type": "string",
           "default": "medium",
           "scope": "resource",
-          "description": "Reasoning effort used for model display/name fallback. Request bodies only use it for models that advertise supportsReasoningEffort and do not set reasoningEffort."
+          "description": "Reasoning effort used when a model does not set reasoningEffort. It is applied only if the value is included in that model's advertised supportsReasoningEffort levels, which default to the provider five levels."
         },
         "copilotCustomProvider.requestTimeoutMs": {
           "type": "number",

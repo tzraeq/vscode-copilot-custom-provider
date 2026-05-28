@@ -33,7 +33,6 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "toolCalling": true,
           "vision": true,
           "reasoningEffort": "medium",
-          "supportsReasoningEffort": ["minimal", "low", "medium", "high", "xhigh"],
           "patch": {
             "dropTruncation": true
           }
@@ -44,8 +43,7 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "name": "GPT-5.5 High",
           "toolCalling": true,
           "vision": true,
-          "reasoningEffort": "high",
-          "supportsReasoningEffort": ["minimal", "low", "medium", "high", "xhigh"]
+          "reasoningEffort": "high"
         }
       ]
     },
@@ -60,7 +58,6 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "toolCalling": true,
           "vision": true,
           "reasoningEffort": "medium",
-          "supportsReasoningEffort": ["minimal", "low", "medium", "high", "xhigh"],
           "supportedEndpoints": ["/responses", "ws:/responses"]
         }
       ]
@@ -139,8 +136,8 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 | `thinking` | No | `false` | Advertise thinking support. When `true`, requests include `reasoning.encrypted_content`, encrypted reasoning items are round-tripped, and `temperature` is removed from the final body. |
 | `streaming` | No | global setting | Set `false` to send `stream: false` for this model even when global streaming is enabled. |
 | `editTools` | No | - | Edit tool hints exposed through VS Code model capabilities: `find-replace`, `multi-find-replace`, `apply-patch`, `code-rewrite`. |
-| `reasoningEffort` | No | unset | Preferred/default reasoning effort for this model. The value can be any string; when `supportsReasoningEffort` is set, it is used only if included in that advertised list. |
-| `supportsReasoningEffort` | No | omitted | Reasoning effort levels accepted by the model. Omit to disable the Thinking Effort picker, set `[]` to use the provider default five levels, or set a non-empty array to use those exact picker values. |
+| `reasoningEffort` | No | unset | Preferred/default reasoning effort for this model. The value can be any string, but it is sent only if included in the model's advertised effort list. |
+| `supportsReasoningEffort` | No | default five levels | Reasoning effort levels accepted by the model. Because this provider is Responses-only, omit it or set `[]` to use the provider default five levels, or set a non-empty array to use those exact picker values. |
 | `reasoningEffortFormat` | No | `responses` | `responses` sends nested `reasoning.effort`; `chat-completions` sends top-level `reasoning_effort`. |
 | `temperature` | No | - | Sent as `temperature` when set. |
 | `topP` | No | - | Sent as `top_p` when set. |
@@ -155,7 +152,7 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `copilotCustomProvider.enabled` | `true` | Enable or disable the provider. |
-| `copilotCustomProvider.defaultReasoningEffort` | `medium` | Used for display/name fallback. Request bodies only use it indirectly when a model advertises `supportsReasoningEffort`, does not set `reasoningEffort`, and accepts `medium`. |
+| `copilotCustomProvider.defaultReasoningEffort` | `medium` | Used when a model does not set `reasoningEffort`. It is sent only if the value is included in that model's advertised effort list. |
 | `copilotCustomProvider.requestTimeoutMs` | `120000` | HTTP timeout in milliseconds. |
 | `copilotCustomProvider.enableStreaming` | `true` | Request streaming responses. |
 | `copilotCustomProvider.maxRetries` | `1` | Retry count for failed non-cancelled HTTP requests. |
@@ -195,7 +192,7 @@ If one profile exposes the same upstream model multiple times, set different `pr
 
 ## Reasoning Effort
 
-Set `supportsReasoningEffort` in `settings.json` to expose Copilot's native Thinking Effort picker for that model. Omit the property to leave the picker disabled. Set it to `[]` to use the provider default five levels, currently `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values. The selected value is received as `options.modelConfiguration.reasoningEffort` and sent to the Responses API as nested `reasoning.effort` by default.
+This provider is Responses-only, so each configured model exposes Copilot's native Thinking Effort picker by default. Omit `supportsReasoningEffort` or set it to `[]` to use the provider default five levels, currently `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values. The selected value is received as `options.modelConfiguration.reasoningEffort` and sent to the Responses API as nested `reasoning.effort` by default.
 
 Request priority is `options.modelConfiguration.reasoningEffort`, then `options.modelOptions.reasoningEffort`, then `options.modelOptions.reasoning.effort`, then model `reasoningEffort`. If no request value exists, the default is chosen from the advertised enum: model `reasoningEffort`, then global `defaultReasoningEffort`, then `high` for Claude families or `medium` for others, then the first advertised level.
 

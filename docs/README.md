@@ -50,7 +50,7 @@
 | 官方文档 model 字段 | 基本覆盖 | 本扩展覆盖 `id`、`name`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。`url` 在本扩展中对应 `baseUrl`；`apiType` 固定为 Responses 路线。 |
 | Custom Endpoint 三 API type | 目标外 | 官方整体 provider 支持 `chat-completions`、`responses`、`messages`；0.8.0 只复刻 Responses-compatible 路径。 |
 | URL 解析 | 已实现 | `baseUrl` 自动补全到 `/responses` 或 `/v1/responses`，并识别显式 `/responses`、`/chat/completions`、`/messages` 路径。 |
-| Thinking Effort picker | 已实现 | 走 `configurationSchema.properties.reasoningEffort` 和 `options.modelConfiguration.reasoningEffort`。`supportsReasoningEffort: []` 展开默认五档是本扩展便利规则，不是官方公开契约。 |
+| Thinking Effort picker | 已实现 | 走 `configurationSchema.properties.reasoningEffort` 和 `options.modelConfiguration.reasoningEffort`。本扩展是 Responses-only provider，省略 `supportsReasoningEffort` 或配置为 `[]` 都会展开默认五档；这是本扩展便利规则，不是官方公开契约。 |
 | ZDR/stateful | 已实现主要行为 | ZDR 时 `store: false`、不发送 `previous_response_id`、不回传 stateful marker；非 ZDR 支持 `resp_` marker 复用和历史裁剪。 |
 | Headers/auth | 基本覆盖 | model-level `requestHeaders` 支持 auth 覆盖和 `${apiKey}` 插值；profile-level `extraHeaders` 是本扩展附加能力。 |
 | Responses request body | 接近但非字节级一致 | 覆盖主要 Responses 字段和 BYOK 清理逻辑；内部 experiment 控制的 truncation、prompt cache、context management gate 不可能完全一致。 |
@@ -157,15 +157,15 @@ Responses 兼容处理原则：
 
 推理强度要走官方 BYOK 风格能力声明，不靠自定义 UI：
 
-- model 配置存在 `supportsReasoningEffort` 时，扩展贡献 `configurationSchema.properties.reasoningEffort`。
+- 每个 Responses model 默认贡献 `configurationSchema.properties.reasoningEffort`。
 - Copilot UI 的 Thinking Effort picker 选择值会进入 `options.modelConfiguration.reasoningEffort`。
 - 默认写入 Responses body 的位置是 `reasoning.effort`。
 - 当 `reasoningEffortFormat` 为 `chat-completions` 时，写入顶层 `reasoning_effort`。
 
-本扩展的三态规则：
+本扩展的 Responses-only 默认规则：
 
-- 省略 `supportsReasoningEffort`：不启用原生 Thinking Effort picker。
-- `supportsReasoningEffort: []`：启用 picker，并展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`。
+- 省略 `supportsReasoningEffort`：启用 picker，并展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`。
+- `supportsReasoningEffort: []`：同样启用 picker，并展开为默认五档。
 - `supportsReasoningEffort: ["low", "medium"]` 这类非空数组：按配置值原样作为 picker enum。
 
 请求优先级：
@@ -181,7 +181,7 @@ options.modelConfiguration.reasoningEffort
 -> first advertised level
 ```
 
-注意：`[]` 展开为默认五档是本扩展的配置便利规则，不要写成官方 VS Code 行为。官方依据只确认 `supportsReasoningEffort` 存在时会生成 `configurationSchema.properties.reasoningEffort`。
+注意：省略或 `[]` 展开为默认五档是本扩展的 Responses-only 配置便利规则，不要写成官方 VS Code 行为。官方依据只确认 `supportsReasoningEffort` 存在且非空时会生成 `configurationSchema.properties.reasoningEffort`。
 
 ## Stateful、ZDR 和 WebSocket
 

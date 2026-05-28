@@ -7,7 +7,7 @@ All notable changes to this extension are documented here.
 - Set the VS Code compatibility baseline to `1.121.0`, matching the Custom Endpoint/BYOK provider break point.
 - Kept settings-based profile configuration and `baseUrl` automatic `/v1/responses` resolution.
 - Aligned reasoning effort with the BYOK `configurationSchema` path: `supportsReasoningEffort` now drives the Copilot Thinking Effort picker enum.
-- Treat `supportsReasoningEffort: []` as an explicit request for the provider default five-level Thinking Effort picker.
+- Default omitted or empty `supportsReasoningEffort` to the provider five-level Thinking Effort picker for the Responses-only path.
 - Removed the fixed settings-schema enum for `reasoningEffort` so custom endpoint-specific effort names can be configured.
 - Made the request default reasoning effort match the picker default derived from the configured effort list.
 
