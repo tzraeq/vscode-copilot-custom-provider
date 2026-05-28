@@ -38,8 +38,12 @@ type LanguageModelThinkingPartLike = {
 	readonly metadata?: Record<string, unknown>;
 };
 
+interface ModelPatchDropConfig {
+	truncation: boolean;
+}
+
 interface ModelPatchConfig {
-	dropTruncation: boolean;
+	drop: ModelPatchDropConfig;
 }
 
 interface ModelConfig {
@@ -3259,7 +3263,9 @@ function normalizeModels(models: ModelConfig[] | undefined, profileId: string): 
 			zeroDataRetentionEnabled: false,
 			supportedEndpoints: [responsesEndpoint],
 			patch: {
-				dropTruncation: false
+				drop: {
+					truncation: false
+				}
 			}
 		}];
 	}
@@ -3331,8 +3337,11 @@ function normalizeSupportedEndpoints(value: unknown): ModelSupportedEndpoint[] {
 
 function normalizeModelPatch(value: unknown): ModelPatchConfig {
 	const patch = isRecord(value) ? value : {};
+	const drop = isRecord(patch.drop) ? patch.drop : {};
 	return {
-		dropTruncation: readBoolean(patch.dropTruncation, false)
+		drop: {
+			truncation: readBoolean(drop.truncation, false)
+		}
 	};
 }
 
@@ -3570,7 +3579,7 @@ function applyResponsesRequestCompatibility(
 	)) {
 		delete body.previous_response_id;
 	}
-	if (options.patch?.dropTruncation) {
+	if (options.patch?.drop.truncation) {
 		delete body.truncation;
 	}
 	return body;

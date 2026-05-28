@@ -9,6 +9,7 @@ All notable changes to this extension are documented here.
 - Aligned reasoning effort with the BYOK `configurationSchema` path: `supportsReasoningEffort` now drives the Copilot Thinking Effort picker enum.
 - Default omitted or empty `supportsReasoningEffort` to the provider five-level Thinking Effort picker for the Responses-only path.
 - Removed the fixed settings-schema enum for `reasoningEffort` so custom endpoint-specific effort names can be configured.
+- Replaced `patch.dropTruncation` with `patch.drop.truncation` for third-party relay APIs that cannot handle Copilot's `truncation: "disabled"` request field.
 - Made the request default reasoning effort match the picker default derived from the configured effort list.
 
 ## 0.7.0 - 2026-05-25

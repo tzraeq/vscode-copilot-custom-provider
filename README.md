@@ -30,7 +30,9 @@ Configure one or more profiles in User Settings or workspace `.vscode/settings.j
           "vision": true,
           "reasoningEffort": "medium",
           "patch": {
-            "dropTruncation": true
+            "drop": {
+              "truncation": true
+            }
           }
         },
         {
@@ -140,7 +142,7 @@ Set `apiKeyHeader` and `apiKeyPrefix` only when the whole profile needs a differ
 | `supportedEndpoints` | No | `["/responses"]` | Endpoint mode metadata for this extension. Keep the default for HTTP/SSE. Include `ws:/responses` when the model/endpoint supports Responses WebSocket v2. |
 | `requestHeaders` | No | `{}` | Model-level request headers. Auth headers can override the inferred default, and `${apiKey}` is interpolated. |
 | `extraBody` | No | `{}` | Extra JSON fields merged into requests for this model. |
-| `patch.dropTruncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
+| `patch.drop.truncation` | No | `false` | Deletes top-level `truncation` for third-party relay APIs that cannot handle it. Default `false` keeps request semantics unchanged. |
 
 ## Global Settings
 
@@ -193,7 +195,7 @@ Request priority is `options.modelConfiguration.reasoningEffort`, then `options.
 
 ## Relay Compatibility
 
-`patch.dropTruncation` is a compatibility switch. Some third-party relay APIs do not correctly process Copilot's `truncation: "disabled"` field in Responses API requests. If debugging shows that this field causes the relay to reject or mishandle requests, set `patch.dropTruncation` to `true` for that model.
+`patch.drop.truncation` is a compatibility switch. Some third-party relay APIs do not correctly process Copilot's `truncation: "disabled"` field in Responses API requests. If debugging shows that this field causes the relay to reject or mishandle requests, set `patch.drop.truncation` to `true` for that model.
 
 ## Endpoint Modes
 

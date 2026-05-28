@@ -74,7 +74,9 @@
                       "vision": true,
                       "reasoningEffort": "medium",
                       "patch": {
-                        "dropTruncation": false
+                        "drop": {
+                          "truncation": false
+                        }
                       }
                     }
                   ]
@@ -91,7 +93,9 @@
                       "vision": true,
                       "reasoningEffort": "medium",
                       "patch": {
-                        "dropTruncation": false
+                        "drop": {
+                          "truncation": false
+                        }
                       }
                     }
                   ]
@@ -308,15 +312,27 @@
                     "patch": {
                       "type": "object",
                       "default": {
-                        "dropTruncation": false
+                        "drop": {
+                          "truncation": false
+                        }
                       },
                       "additionalProperties": false,
                       "markdownDescription": "Small compatibility patches applied after all request body fields are merged. Defaults are conservative and do not change request semantics unless explicitly enabled.",
                       "properties": {
-                        "dropTruncation": {
-                          "type": "boolean",
-                          "default": false,
-                          "markdownDescription": "Delete the top-level `truncation` field from the outgoing Responses API request. Some third-party relay APIs cannot correctly handle Copilot's `truncation: \"disabled\"` field; enable this only when debugging shows removing that field fixes the relay. Default `false` preserves normal request semantics."
+                        "drop": {
+                          "type": "object",
+                          "default": {
+                            "truncation": false
+                          },
+                          "additionalProperties": false,
+                          "markdownDescription": "Compatibility switches that delete selected fields from the outgoing Responses API request.",
+                          "properties": {
+                            "truncation": {
+                              "type": "boolean",
+                              "default": false,
+                              "markdownDescription": "Delete the top-level `truncation` field from the outgoing Responses API request. Some third-party relay APIs cannot correctly handle Copilot's `truncation: \"disabled\"` field; enable this only when debugging shows removing that field fixes the relay. Default `false` preserves normal request semantics."
+                            }
+                          }
                         }
                       }
                     }

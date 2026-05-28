@@ -23,7 +23,7 @@
 实现优先级：
 
 1. 先保证公开 `LanguageModelChatProvider` 能力声明、请求构造、流式解析、工具调用和 token/usage 回传可用。
-2. 保留本扩展已经有价值的 settings 便利能力，例如 profiles、model-level `baseUrl`、SecretStorage key、`patch.dropTruncation`。
+2. 保留本扩展已经有价值的 settings 便利能力，例如 profiles、model-level `baseUrl`、SecretStorage key、`patch.drop.truncation`。
 3. 参考内置 Custom Endpoint/BYOK 的公开字段和源码行为时，只吸收适合公开 provider API 的部分；对内部能力只记录差异，不作为必须复刻的缺口。
 
 ## 官方公开文档确认的边界
@@ -161,7 +161,7 @@ Responses 兼容处理原则：
 - thinking 模型删除 `temperature`。
 - ZDR、非 `resp_` marker、显式 full-history retry 时删除 `previous_response_id`。
 - 空 `tools` 和孤立 `tool_choice` 会被清理。
-- `patch.dropTruncation` 只在模型显式开启时删除顶层 `truncation`，默认不改变官方语义。
+- `patch.drop.truncation` 只在模型显式开启时删除顶层 `truncation`，默认不改变官方语义。
 
 这部分目标是生成标准 Responses-compatible request，而不是把 GitHub CAPI request 原样转发给用户 endpoint。内置 BYOK `OpenAIEndpoint.createRequestBody` 和 `interceptBody` 的 Responses 路径行为只作为兼容参考。
 
