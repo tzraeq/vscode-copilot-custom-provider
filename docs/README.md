@@ -1,85 +1,165 @@
-# Engineering Notes
+# 开发说明
 
-This document records implementation details and technical decisions for maintainers. End-user setup belongs in the root `README.md`.
+这份文档是维护者和后续开发会话的入口。用户安装、配置示例和常规使用说明放在根目录 `README.md`；官方源码核对、Responses API 调用链路和证据链接放在 `docs/copilot-provider-responses-api-flow.md`。
 
-For source-backed Copilot/Responses API findings, see `docs/copilot-provider-responses-api-flow.md`. That document should be updated whenever provider behavior is rechecked against VS Code/Copilot or OpenAI official sources.
+后续重开会话时，先读本文件确认当前版本目标和实现边界，再读 `docs/copilot-provider-responses-api-flow.md` 核对官方依据。不要把没有官方源码或官方 schema 支撑的细节写成确定结论。
 
-## Provider Surface
+## 0.8.0 开发目标
 
-The extension registers one VS Code language model provider:
+0.8.0 的目标不是“基本稳定可用”，而是尽量复刻 VS Code 内置 Custom Endpoint/BYOK provider 在 Responses API 路径上的能力，使自定义 provider 能完整适配 Copilot 对 provider 的调用。
 
-```text
-vendor: custom-openai-responses
-displayName: Custom OpenAI Responses
-```
+当前基线：
 
-All configured profiles and models are exposed under that single provider. Because Copilot groups by provider display name, the default visible model name includes the profile name through `copilotCustomProvider.modelNameTemplate`.
+- VS Code/Copilot 行为基线：VS Code `1.121.0` 之后的 Custom Endpoint/BYOK provider。
+- 不再兼容目标：`1.121.0` 之前 legacy `customOAI` / OpenAI Compatible provider 配置形状。
+- API 路线：固定面向 OpenAI Responses API compatible endpoint，不在本扩展内同时实现 Chat Completions 或 Messages provider。
+- 配置路线：保留本扩展 settings-based multi-profile 配置，不改成官方 Custom Endpoint 的单模型 `url` 配置形状。
+- URL 行为：保留 `baseUrl` 自动补全能力，按官方 Custom Endpoint `responses` 路径规则解析到 `/v1/responses` 或 `/responses`。
+- 推理强度：使用官方 BYOK 风格的 `configurationSchema.properties.reasoningEffort` 暴露 Copilot 原生 Thinking Effort picker。
 
-VS Code requires provider model ids to be unique within one provider. The extension therefore separates:
+实现优先级：
 
-- `providerId`: unique VS Code/Copilot model id.
-- `id` / `apiModel`: upstream model id sent to the OpenAI Responses API.
+1. 先对齐官方 Custom Endpoint/BYOK provider 的公开能力声明和 Responses request 构造。
+2. 再保留本扩展已经有价值的 settings 便利能力，例如 profiles、model-level `baseUrl`、SecretStorage key、`patch.dropTruncation`。
+3. 对官方没有公开入口的内部能力，只记录缺口，不臆造等价实现。
 
-This allows multiple profiles to send the same upstream model id, for example `gpt-5.5`, while still exposing unique provider ids such as `host-a/gpt-5.5` and `host-b/gpt-5.5`.
+## 文档分工
 
-## Configuration Model
+- `README.md`：面向使用者，说明怎么配置 profiles、models、API key、baseUrl、reasoning effort 和调试日志。
+- `docs/README.md`：面向开发者，记录版本目标、实现原则、方案分类和容易混淆的结论。
+- `docs/copilot-provider-responses-api-flow.md`：源码级证据文档。每次重新核对 VS Code/Copilot/OpenAI 官方来源，都应该把关键结论追加到这里。
+- `CHANGELOG.md`：版本变更摘要，不承载完整设计推理。
 
-The first supported configuration model is multi-profile only. There is no compatibility layer for an older single-endpoint shape.
+## Provider 层级
 
-Each profile owns:
+本扩展实现的是公开 VS Code `LanguageModelChatProvider` 层。它不是 GitHub Copilot 内置模型的透明代理，也不会替换 GitHub 管理的内置模型。
 
-- a stable `id`;
-- a `baseUrl`;
-- optional auth header settings;
-- optional request body overrides;
-- one or more model entries.
-
-The API key is intentionally not a normal required settings field. The preferred flow stores keys in VS Code SecretStorage using:
-
-```text
-copilotCustomProvider.apiKey.<profile id>
-```
-
-Inline `profiles[].apiKey` remains available as a fallback for local or disposable setups, but SecretStorage wins when both are present.
-
-## URL Resolution
-
-`baseUrl` follows VS Code Custom Endpoint URL resolution for the `responses` API type.
-
-If the configured URL already contains `/responses`, `/chat/completions`, or `/messages`, it is treated as an explicit API endpoint URL and used as configured.
-
-Otherwise the extension appends the Responses path the same way as VS Code's `resolveCustomEndpointUrl`:
+简化链路：
 
 ```text
-<base>/v1/responses
+Copilot Chat / Agent
+-> VS Code Language Model 服务
+-> 本扩展 LanguageModelChatProvider
+-> 本扩展 Responses request 适配层
+-> 用户配置的 OpenAI-compatible /v1/responses endpoint
 ```
 
-If the URL already ends in a version segment such as `/v1` or `/v2`, only `/responses` is appended.
+官方内置模型的关键差异：
 
-The same rule applies to profile-level and model-level `baseUrl`.
+```text
+Copilot Chat / Agent
+-> VS Code/Copilot 内置 ChatEndpoint
+-> capiClientService.makeRequest(..., { type: ChatResponses })
+-> GitHub CAPI /responses
+-> GitHub 管理的模型后端
+```
 
-## Request Headers
+已确认的边界是：内置模型客户端侧发送的是 Responses 语义 body，但网络目标是 GitHub CAPI `/responses`，不是用户可直接替换的 OpenAI `/v1/responses`。GitHub CAPI 后端如何继续路由，不在公开客户端源码中，不能写成确定结论。
 
-Profile-level auth follows VS Code Custom Endpoint behavior when `apiKeyHeader` is omitted:
+## 配置模型
 
-- URLs containing `openai.azure` use `api-key: <key>`.
-- Other URLs use `Authorization: Bearer <key>`.
+当前只支持 multi-profile 配置：
 
-Profile `extraHeaders` are static non-auth headers and are sanitized with reserved/unsafe header names blocked.
+- profile 表示一个 endpoint/key/header/body override 组；
+- model 表示该 profile 下暴露给 Copilot 的一个模型能力声明；
+- API key 优先存储在 VS Code SecretStorage，secret key 为 `copilotCustomProvider.apiKey.<profile id>`；
+- `profiles[].apiKey` 只作为 inline fallback，SecretStorage 优先级更高。
 
-Model `requestHeaders` mirrors the Custom Endpoint `requestHeaders` capability. It uses the same header sanitizer but permits `authorization` and `api-key` as explicit auth overrides, suppresses the inferred profile auth when a well-known auth header is present, and replaces `${apiKey}` with the profile API key.
+模型 ID 分两层：
 
-## Request Transport
+- `providerId`：VS Code/Copilot 看到的 provider 内唯一模型 ID，默认 `<profile id>/<model id>`。
+- `id` / `apiModel`：发送给上游 Responses API 的模型 ID，可以在不同 profile 中重复。
 
-The extension uses the VS Code extension host runtime's built-in `fetch` for HTTP/SSE requests. No third-party HTTP client is used.
+这个分层是必要的，因为 VS Code 要求同一个 provider 内的模型 ID 唯一，但多个 endpoint 经常暴露相同上游模型名。
 
-Timeouts and cancellation are handled with `AbortController`.
+## URL 解析
 
-For HTTP/SSE, non-ZDR models report the returned `response.id` back to VS Code as a state marker and can send `previous_response_id` on later turns when that marker is still present in chat history. If the upstream rejects that marker as invalid, expired, or missing, the extension retries once with full available history and without `previous_response_id`.
+`baseUrl` 不是简单字符串拼接，而是按官方 Custom Endpoint 的 Responses 路径规则处理：
 
-## WebSocket Responses API
+- URL 已包含 `/responses`、`/chat/completions` 或 `/messages`：视为显式 API endpoint，原样使用。
+- URL 以版本段结尾，例如 `/v1` 或 `/v2`：追加 `/responses`。
+- 其他 URL：追加 `/v1/responses`。
 
-Models opt into Responses WebSocket v2 by declaring:
+同一规则适用于 profile-level `baseUrl` 和 model-level `baseUrl`。本扩展使用 `baseUrl` 字段，而官方 Custom Endpoint model config 使用 `url`；这属于配置字段名差异，不改变 Responses 请求目标语义。
+
+## 鉴权和 Headers
+
+profile 默认鉴权跟随官方 Custom Endpoint 行为：
+
+- URL 包含 `openai.azure`：使用 `api-key: <key>`。
+- 其他 URL：使用 `Authorization: Bearer <key>`。
+
+字段分工：
+
+- `extraHeaders`：profile-level 静态非鉴权 header，会过滤保留和不安全 header。
+- `requestHeaders`：model-level header，模拟官方 Custom Endpoint 的能力；允许显式覆盖 `authorization` 和 `api-key`，支持 `${apiKey}` 插值。
+- 如果 `requestHeaders` 中出现常见鉴权 header，扩展会抑制默认鉴权 header，避免重复发送。
+
+## Request Body 构造
+
+请求体按以下顺序构造和覆盖：
+
+```text
+provider defaults
+-> global requestBodyOverrides
+-> profile requestBodyOverrides
+-> model extraBody
+-> VS Code modelOptions
+-> compatibility patches
+```
+
+Responses 兼容处理原则：
+
+- 删除 Responses 路径不应带出的 `n` 和 `stream_options`。
+- 非 thinking 模型删除 `reasoning` 和 `include`。
+- thinking 模型删除 `temperature`。
+- ZDR、非 `resp_` marker、显式 full-history retry 时删除 `previous_response_id`。
+- 空 `tools` 和孤立 `tool_choice` 会被清理。
+- `patch.dropTruncation` 只在模型显式开启时删除顶层 `truncation`，默认不改变官方语义。
+
+这部分目标是对齐官方 BYOK `OpenAIEndpoint.createRequestBody` 和 `interceptBody` 的 Responses 路径行为，而不是把 GitHub CAPI request 原样转发给用户 endpoint。
+
+## Reasoning Effort
+
+推理强度要走官方 BYOK 风格能力声明，不靠自定义 UI：
+
+- model 配置存在 `supportsReasoningEffort` 时，扩展贡献 `configurationSchema.properties.reasoningEffort`。
+- Copilot UI 的 Thinking Effort picker 选择值会进入 `options.modelConfiguration.reasoningEffort`。
+- 默认写入 Responses body 的位置是 `reasoning.effort`。
+- 当 `reasoningEffortFormat` 为 `chat-completions` 时，写入顶层 `reasoning_effort`。
+
+本扩展的三态规则：
+
+- 省略 `supportsReasoningEffort`：不启用原生 Thinking Effort picker。
+- `supportsReasoningEffort: []`：启用 picker，并展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`。
+- `supportsReasoningEffort: ["low", "medium"]` 这类非空数组：按配置值原样作为 picker enum。
+
+请求优先级：
+
+```text
+options.modelConfiguration.reasoningEffort
+-> options.modelOptions.reasoningEffort
+-> options.modelOptions.reasoning.effort
+-> options.modelOptions.reasoning_effort
+-> model.reasoningEffort
+-> global defaultReasoningEffort
+-> family preferred default
+-> first advertised level
+```
+
+注意：`[]` 展开为默认五档是本扩展的配置便利规则，不要写成官方 VS Code 行为。官方依据只确认 `supportsReasoningEffort` 存在时会生成 `configurationSchema.properties.reasoningEffort`。
+
+## Stateful、ZDR 和 WebSocket
+
+HTTP/SSE 路径下，非 ZDR 模型会把上游返回的 Responses `response.id` 作为 stateful marker 通过 `LanguageModelDataPart` 回传给 VS Code。后续请求如果还能找到该 marker，可以发送 `previous_response_id` 并裁剪历史。
+
+ZDR 模型行为：
+
+- 请求体发送 `store: false`。
+- 不发送 `previous_response_id`。
+- 不复用 stateful marker。
+
+WebSocket Responses v2 是显式 opt-in：
 
 ```json
 {
@@ -87,55 +167,11 @@ Models opt into Responses WebSocket v2 by declaring:
 }
 ```
 
-This is a capability declaration. The extension does not probe or infer WebSocket support from the URL.
-
-When WebSocket is selected:
-
-- `https://.../v1/responses` is converted to `wss://.../v1/responses`;
-- the client sends `response.create` messages;
-- the HTTP-only `stream` field is omitted;
-- the returned `response.id` is reported back to VS Code as a state marker;
-- later turns on the same active chat connection can reuse that marker as `previous_response_id`.
-
-If `zeroDataRetentionEnabled` is `true`, `previous_response_id` is suppressed on both HTTP/SSE and WebSocket paths, and the request body sends `store: false`.
-
-If a WebSocket request fails because the upstream rejects `previous_response_id`, the extension retries once without that field.
-
-## Request Body Construction
-
-Requests are built in this order:
-
-```text
-provider defaults -> global requestBodyOverrides -> profile requestBodyOverrides -> model extraBody -> modelOptions -> patches
-```
-
-After merges, compatibility handling removes fields that the official BYOK path also removes or gates:
-
-- `n` and `stream_options` are removed for Responses requests;
-- `reasoning` and `include` are removed unless the model has `thinking: true`;
-- `temperature` is removed when `thinking: true`;
-- `previous_response_id` is removed for ZDR, non-Responses ids, and explicit retry/full-history cases;
-- empty `tools` and orphaned `tool_choice` are removed.
-
-`patch.dropTruncation` runs after all body fields have been merged. It deletes the top-level `truncation` field only when a model explicitly enables it.
-
-The default for `dropTruncation` is `false` so the extension does not change request semantics unless the user opts in.
-
-## Reasoning Effort
-
-When a model declares `supportsReasoningEffort`, the extension contributes `configurationSchema.properties.reasoningEffort` so VS Code/Copilot can pass the native Thinking Effort selection as `options.modelConfiguration.reasoningEffort`. Omit the property to disable the picker. Set it to `[]` to use the provider default five levels: `minimal`, `low`, `medium`, `high`, and `xhigh`. Set a non-empty array to use those exact picker values.
-
-Request priority is:
-
-```text
-modelConfiguration.reasoningEffort -> modelOptions.reasoningEffort -> modelOptions.reasoning.effort -> model.reasoningEffort -> defaultReasoningEffort -> preferred family default -> first advertised level
-```
-
-The final body scrubs any preexisting effort first, then writes either nested `reasoning.effort` or top-level `reasoning_effort` according to `reasoningEffortFormat`.
+扩展不会根据 URL 探测 WebSocket 支持。只有模型声明 `ws:/responses` 时才允许走 WebSocket 路径。
 
 ## Internal Data Parts
 
-VS Code and Copilot can pass provider-specific metadata through `LanguageModelDataPart`. The extension treats these MIME types as internal and does not forward them as model input:
+VS Code/Copilot 会通过 `LanguageModelDataPart` 传递 provider 内部元数据。本扩展把以下 MIME type 视为内部数据，不作为用户输入转发给模型：
 
 ```text
 usage
@@ -145,21 +181,18 @@ context_management
 reasoning
 ```
 
-They are also excluded from fallback token estimation. Token counting should reflect user/model-visible input, not provider bookkeeping metadata.
+其中：
 
-`reasoning` and `context_management` are used to round-trip Responses API encrypted reasoning and compaction items through the public VS Code `LanguageModelDataPart` surface.
-
-Image data parts are different: `image/*` data parts are real model input when the configured model has `vision: true`, so they are converted to Responses API `input_image` content.
+- `usage` 用于 Copilot context usage 展示。
+- `stateful_marker` 用于 Responses `previous_response_id` 复用。
+- `reasoning` 和 `context_management` 用于 encrypted reasoning 和 compaction item round-trip。
+- `image/*` 不属于内部数据；当模型 `vision: true` 时会转成 Responses `input_image`。
 
 ## Usage Reporting
 
-Copilot's context usage display depends on providers reporting a `LanguageModelDataPart` with:
+Copilot 的 context usage 显示依赖 provider 回传 `mimeType: usage` 的 `LanguageModelDataPart`。
 
-```text
-mimeType: usage
-```
-
-The extension maps OpenAI Responses API usage into Copilot's expected token field names:
+映射关系：
 
 | Responses API | Reported usage |
 | --- | --- |
@@ -169,50 +202,97 @@ The extension maps OpenAI Responses API usage into Copilot's expected token fiel
 | `input_tokens_details.cached_tokens` | `prompt_tokens_details.cached_tokens` |
 | `output_tokens_details.reasoning_tokens` | `completion_tokens_details.reasoning_tokens` |
 
-For streaming HTTP/SSE, usage is reported when `response.completed` contains `response.usage`. For non-streaming requests, usage is reported from the final response payload.
+流式 HTTP/SSE 在 `response.completed` 事件中读取 `response.usage`；非流式请求从最终 response payload 读取 usage。上游不返回 usage 时，Copilot 可能显示为 0。
 
-If the upstream service omits usage, Copilot may show context usage as zero.
+## Tool Calling 和 Tool Search
 
-## Tool Calling
+`toolCalling` 决定是否向 VS Code 声明工具能力并把工具定义转发到 Responses request：
 
-When `toolCalling` is enabled for a model, VS Code tool definitions are forwarded to the Responses API request.
+- `false`：不声明工具能力。
+- `true`：声明工具能力。
+- number：声明工具能力，并表示可接受的最大工具数量。
 
-`toolCalling` can be:
+完整 `tool_search` 仍是已知缺口。官方内置 Responses 路径有 client-executed `tool_search` deferral 机制，但它依赖 Copilot 内部 `IToolDeferralService`，公开 provider API 目前不能等价取得这部分上下文。本扩展会把 `tool_search` 视为保留 tool name，避免误当普通 function tool 转发。
 
-- `false`: no tool support advertised;
-- `true`: tool support advertised;
-- a number: maximum number of tools accepted.
+## 代理方案分类
 
-## Debugging
+### 推荐：Custom Endpoint 后置代理
 
-`copilotCustomProvider.logLevel` controls output logging:
+让本扩展的 `baseUrl` 指向本地或远端适配代理，例如：
 
-- `off`: no request logs;
-- `info`: request metadata;
-- `debug`: outgoing request headers and JSON body, with API key headers redacted.
+```text
+http://127.0.0.1:8787/v1/responses
+```
 
-Debug logs can contain prompt and workspace content, so this setting should be used only while diagnosing a problem.
+这种代理适合处理：
 
-`provideTokenCount()` also emits token-estimation diagnostics when `logLevel` is `debug`.
+- OpenAI Responses API 到其他供应商 API 的转换。
+- SSE/非流式格式转换。
+- 网关鉴权、header 改写、模型 ID 映射。
+- 请求/响应日志和回放。
+- 供应商兼容性补丁。
 
-## Build and Packaging
+仍应留在扩展里的事情：
 
-The runtime entrypoint is:
+- 模型列表和模型能力声明。
+- Thinking Effort picker 的 `configurationSchema`。
+- `toolCalling`、`vision`、`editTools`、`thinking`、`streaming` 等请求前能力。
+- stateful marker 和 encrypted reasoning 这类 provider 上下文整理。
+
+原因是这些能力在 HTTP 请求发出前已经影响 Copilot UI、模型选择和请求构造，后置代理无法补救。
+
+### 不作为主线：拦截官方内置 Copilot/CAPI 流量
+
+官方内置模型使用 `capiClientService.makeRequest(..., { type: ChatResponses })` 请求 GitHub CAPI `/responses`。这不是官方公开 provider 扩展点。
+
+拦截 CAPI 流量可以用于网络调试，但不适合作为“能力一模一样”的主线：
+
+- 它不能可靠改变模型选择 UI、Thinking Effort picker、vision、toolCalling、editTools 等请求前能力声明。
+- GitHub CAPI 服务端私有契约不完整公开。
+- 要稳定替换内置模型，通常还要兼容 `/models`、`/models/session`、policy、intent 等更多 CAPI endpoint。
+
+如果明确要调试 CAPI base URL，源码里存在 `github.copilot.advanced.debug.overrideCapiUrl`。这会改变 Copilot CAPI base URL，例如把 ChatResponses 发到 `<overrideCapiUrl>/responses`。这个结论已经记录在 `docs/copilot-provider-responses-api-flow.md`，但它不改变本扩展主线目标。
+
+## 已知缺口
+
+这些缺口不要在实现或文档里伪装成已完整复刻：
+
+- 完整 client-executed `tool_search` deferral。
+- GitHub CAPI 内部模型后端路由和服务端策略。
+- 内置模型的完整 telemetry、content filter、billing、SKU、premium、实验开关和 server-side feature gate。
+- 基于内部 conversation id/experiment state 的 `prompt_cache_key` 生成。
+- 官方 Custom Endpoint 在一个 provider 中同时支持 `chat-completions`、`responses`、`messages`；本扩展当前只做 Responses-compatible 服务。
+
+## 调试
+
+`copilotCustomProvider.logLevel` 控制输出日志：
+
+- `off`：不记录请求日志。
+- `info`：记录请求元数据。
+- `debug`：记录出站请求 headers 和 JSON body，API key header 会脱敏。
+
+debug 日志可能包含 prompt 和 workspace 内容，只应在诊断问题时开启。
+
+`provideTokenCount()` 在 `debug` 级别也会输出 token estimate 诊断。
+
+## 构建和打包
+
+运行入口：
 
 ```text
 dist/extension.js
 ```
 
-After changing TypeScript source, run:
+修改 TypeScript 后运行：
 
 ```text
 npm run compile
 ```
 
-To produce a VSIX:
+生成 VSIX：
 
 ```text
 npm run package
 ```
 
-When testing an installed VSIX, bumping the package version can help avoid stale extension or Copilot model metadata caches.
+测试已安装 VSIX 时，如果怀疑 VS Code 或 Copilot 缓存了旧模型 metadata，优先提升 package version 再重新安装。
