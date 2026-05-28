@@ -2,7 +2,7 @@
 
 这份文档用于持续沉淀 VS Code/Copilot provider 行为的源码级结论。不要在这里加入无法从官方源码或官方 schema 追溯的实现细节。
 
-核对日期：2026-05-27。
+核对日期：2026-05-28。
 
 ## 源码基线
 
@@ -10,6 +10,33 @@
 - VS Code 源码：`microsoft/vscode` commit `b62d3739a7fee78ddb51c6da8ab0308adac43c63`。
 - VS Code 使用的 Copilot API 客户端包：`@vscode/copilot-api@0.4.1`。
 - OpenAI API schema：`openai/openai-openapi` commit `5162af98d3147432c14680df789e8e12d4891e6b`。
+
+## 官方公开文档描述
+
+2026-05-28 重新核对了 VS Code 官方文档 `AI language models in VS Code`，入口：https://code.visualstudio.com/docs/copilot/customization/language-models
+
+官方文档能直接确认的 Custom Endpoint/BYOK 行为：
+
+- BYOK models 可以不登录 GitHub、没有 Copilot plan 使用；它覆盖 chat experience 和 utility tasks。semantic search、inline suggestions/code completions、embeddings 这类依赖 GitHub Copilot 服务的能力不属于 BYOK 离线/自带 key 覆盖范围。
+- Custom Endpoint provider 替代 deprecated OpenAI Compatible provider；旧的 `github.copilot.chat.customOAIModels` setting 已废弃。
+- Custom Endpoint provider 支持三种 API type：Chat Completions、Responses、Messages，并要求用户选择模型实际支持的 API type。
+- `chatLanguageModels.json` 配置分 provider-level 和 model-level。provider-level 文档列出 `vendor`、`name`、`models`。
+- model-level 文档列出 `id`、`name`、`url`、`apiType`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。
+- `apiType` 可按 model 覆盖，取值是 `chat-completions`、`responses`、`messages`。
+- `zeroDataRetentionEnabled: true` 时，Responses API 请求不发送 `previous_response_id`，默认值是 `false`。
+- `supportsReasoningEffort` 是模型接受的 reasoning effort levels 数组；设置后 model picker 显示 Thinking Effort picker。官方文档举例 `["low", "medium", "high"]`，并说常见 levels 是 `minimal`、`low`、`medium`、`high`。
+- `reasoningEffortFormat` 决定 reasoning effort 的 body shape：`chat-completions` 写顶层 `reasoning_effort`，`responses` 写嵌套 `reasoning.effort`；未设置时跟随 URL。
+- `requestHeaders` 是发给该 model 的额外 HTTP headers；forbidden、forwarding、internal headers 不允许并会被忽略。
+
+公开文档没有写明的内容：
+
+- URL 自动补全到 `/responses` 或 `/v1/responses` 的精确规则。
+- header sanitizer 的完整保留名单、数量限制和值校验。
+- Responses request body 的完整字段映射。
+- stateful marker、encrypted reasoning、context management 的 `LanguageModelDataPart` round-trip。
+- `tool_search` deferral、`prompt_cache_key`、WebSocket Responses gate、content-filter/telemetry 的内部行为。
+
+这些内容只能依据 VS Code/Copilot 源码继续核对，不能从公开文档本身推出。
 
 ## 版本基线和断点
 
@@ -272,6 +299,7 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 
 当前本仓库实现的映射：
 
+- 当前结论：不是 100% 字节级/行为级复刻官方 Custom Endpoint/BYOK Responses 路径。公开文档列出的 Responses 相关配置能力已基本覆盖；源码级内部能力仍有缺口，见“已知缺口”。
 - `profiles[].models[].supportsReasoningEffort` 声明可接受 levels，并启用 picker schema；这个 settings 数组就是 Copilot Thinking Effort UI 的枚举来源。本扩展额外提供配置便利规则：省略该属性表示不启用 picker；显式配置 `[]` 会展开为默认五档 `minimal`、`low`、`medium`、`high`、`xhigh`；非空数组按配置原样作为 picker enum。
 - `profiles[].models[].reasoningEffort` 作为 model fallback effort。0.8.0 起不再限制为固定五档字符串；只要 endpoint 接受，并且值在 `supportsReasoningEffort` 中，就可以显示在 UI 并写入请求体。
 - 请求优先级：`options.modelConfiguration.reasoningEffort` -> `options.modelOptions.reasoningEffort` -> `options.modelOptions.reasoning.effort` -> `options.modelOptions.reasoning_effort` -> model `reasoningEffort`。
@@ -297,6 +325,8 @@ VS Code Responses 路径可以复用 `previous_response_id`，并在启用时有
 
 - 完整 client-executed `tool_search` deferral 尚未实现，因为公开 provider API 不暴露 Copilot 内部 `IToolDeferralService`。
 - `prompt_cache_key` 生成依赖内部 `conversationId` 和 experiment state；本仓库目前不能通过公开 provider request 拿到同等数据。
+- 官方 Responses processor 会处理 `response.reasoning_summary_text.delta` 和 `response.reasoning_summary_part.done`，并以 thinking progress 形式回传；本仓库当前只 round-trip encrypted reasoning item，没有完整展示 reasoning summary streaming events。
+- 官方 Responses processor 会把 `image_generation_call` 的 result 转成 image content；本仓库当前没有等价输出转换。
 - VS Code 内置路径包含内部 telemetry 和 content-filter 处理，本仓库没有完整复刻。
 - 内置 provider 在一个 Custom Endpoint provider 中支持 Chat Completions、Responses、Messages。本扩展当前只面向 Responses-compatible 服务。
 

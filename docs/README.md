@@ -23,6 +23,40 @@
 2. 再保留本扩展已经有价值的 settings 便利能力，例如 profiles、model-level `baseUrl`、SecretStorage key、`patch.dropTruncation`。
 3. 对官方没有公开入口的内部能力，只记录缺口，不臆造等价实现。
 
+## 官方公开文档确认的契约
+
+最近核对：2026-05-28。官方文档入口是 VS Code `AI language models in VS Code` 的 BYOK / Custom Endpoint / Model configuration reference 部分：https://code.visualstudio.com/docs/copilot/customization/language-models
+
+公开文档能确认的点：
+
+- BYOK 模型可以不登录 GitHub、没有 Copilot plan 使用；但 BYOK 只覆盖 chat experience 和 utility tasks。semantic search、inline suggestions/code completions、embeddings 这类依赖 GitHub Copilot 服务的能力不属于 BYOK 离线/自带 key 覆盖范围。
+- Custom Endpoint provider 替代 deprecated OpenAI Compatible provider；旧的 `github.copilot.chat.customOAIModels` setting 已废弃。
+- Custom Endpoint provider 支持三类 API type，并可按 model 选择：`chat-completions`、`responses`、`messages`。
+- 官方 `chatLanguageModels.json` 配置有 provider-level 和 model-level 两层。provider-level 包括 `vendor`、`name`、`models`。
+- model-level 文档列出的字段包括：`id`、`name`、`url`、`apiType`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。
+- `zeroDataRetentionEnabled: true` 的公开行为是 Responses API 请求不发送 `previous_response_id`。
+- `supportsReasoningEffort` 设置后，model picker 显示 Thinking Effort picker；公开文档只举例 `minimal`、`low`、`medium`、`high` 这些常见值，不声明空数组会展开默认档位。
+- `reasoningEffortFormat` 的公开行为是：`chat-completions` 写顶层 `reasoning_effort` 字符串，`responses` 写嵌套 `reasoning.effort` 对象；未设置时跟随 URL/API path。
+- `requestHeaders` 是发给该 model 的额外 HTTP headers；官方文档只说明 forbidden、forwarding、internal headers 会被忽略，详细 sanitizer 规则需要看源码。
+
+公开文档没有展开的点，例如 Responses body 精确字段、stateful marker 的 data part 形状、`tool_search` deferral、`prompt_cache_key`、WebSocket gate、header sanitizer 细节，都只能按 `docs/copilot-provider-responses-api-flow.md` 里的官方源码证据记录。
+
+## 当前完成度结论
+
+结论：截至 2026-05-28，不能写成“100% 已实现 VS Code 内置 Custom Endpoint/BYOK provider 在 Responses API 路径上的所有能力”。更准确的说法是：官方公开文档列出的 Responses 路径配置能力已经基本覆盖；源码级完整行为仍有缺口，尤其是 `tool_search` deferral、`prompt_cache_key`、reasoning summary 流式展示，以及若干内部 experiment/CAPI/telemetry/content-filter 行为。
+
+| 能力面 | 当前状态 | 说明 |
+| --- | --- | --- |
+| 官方文档 model 字段 | 基本覆盖 | 本扩展覆盖 `id`、`name`、`toolCalling`、`vision`、`maxInputTokens`、`maxOutputTokens`、`editTools`、`thinking`、`streaming`、`zeroDataRetentionEnabled`、`supportsReasoningEffort`、`reasoningEffortFormat`、`requestHeaders`。`url` 在本扩展中对应 `baseUrl`；`apiType` 固定为 Responses 路线。 |
+| Custom Endpoint 三 API type | 目标外 | 官方整体 provider 支持 `chat-completions`、`responses`、`messages`；0.8.0 只复刻 Responses-compatible 路径。 |
+| URL 解析 | 已实现 | `baseUrl` 自动补全到 `/responses` 或 `/v1/responses`，并识别显式 `/responses`、`/chat/completions`、`/messages` 路径。 |
+| Thinking Effort picker | 已实现 | 走 `configurationSchema.properties.reasoningEffort` 和 `options.modelConfiguration.reasoningEffort`。`supportsReasoningEffort: []` 展开默认五档是本扩展便利规则，不是官方公开契约。 |
+| ZDR/stateful | 已实现主要行为 | ZDR 时 `store: false`、不发送 `previous_response_id`、不回传 stateful marker；非 ZDR 支持 `resp_` marker 复用和历史裁剪。 |
+| Headers/auth | 基本覆盖 | model-level `requestHeaders` 支持 auth 覆盖和 `${apiKey}` 插值；profile-level `extraHeaders` 是本扩展附加能力。 |
+| Responses request body | 接近但非字节级一致 | 覆盖主要 Responses 字段和 BYOK 清理逻辑；内部 experiment 控制的 truncation、prompt cache、context management gate 不可能完全一致。 |
+| Streaming/response 解析 | 部分覆盖 | 文本、function tool call、usage、stateful marker、encrypted reasoning/context management round-trip 已覆盖；reasoning summary events 暂未作为 `LanguageModelThinkingPart` 进度展示，`image_generation_call` 输出也未做等价转换。 |
+| `tool_search` | 未完整实现 | 当前只把 `tool_search` 当保留 tool name，不作为普通 function tool 转发；官方完整 deferral 依赖内部 `IToolDeferralService`。 |
+
 ## 文档分工
 
 - `README.md`：面向使用者，说明怎么配置 profiles、models、API key、baseUrl、reasoning effort 和调试日志。
@@ -258,6 +292,8 @@ http://127.0.0.1:8787/v1/responses
 这些缺口不要在实现或文档里伪装成已完整复刻：
 
 - 完整 client-executed `tool_search` deferral。
+- reasoning summary streaming events 到 Thinking progress 的等价展示。
+- Responses `image_generation_call` 输出的等价回传。
 - GitHub CAPI 内部模型后端路由和服务端策略。
 - 内置模型的完整 telemetry、content filter、billing、SKU、premium、实验开关和 server-side feature gate。
 - 基于内部 conversation id/experiment state 的 `prompt_cache_key` 生成。
