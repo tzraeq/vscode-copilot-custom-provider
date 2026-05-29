@@ -2,9 +2,11 @@
 
 Adds a VS Code language model provider named `Custom OpenAI Responses` for OpenAI **Responses API** compatible services.
 
-This extension uses VS Code's public `LanguageModelChatProvider` extension API. It does not replace or proxy GitHub Copilot's built-in models, and it is not the built-in Custom Endpoint provider. It adds separate custom models to the VS Code/Copilot model picker and sends requests to the endpoints you configure.
+VS Code Insiders ships a built-in [Custom Endpoint provider for BYOK](https://code.visualstudio.com/updates/v1_121#_custom-endpoint-provider-for-byok-insiders) that covers most third-party endpoint setups. **Try that first** if you do not need anything extra.
 
-VS Code also documents a built-in Custom Endpoint/BYOK path for compatible third-party endpoints. This extension does not target that implementation or require the built-in Custom Endpoint UI. Those docs are used only as a reference for common model capability names and Responses API conventions.
+This extension exists for cases the built-in provider does not handle well—especially relays built on [New API](https://github.com/QuantumNous/new-api), where some versions mishandle Copilot's `truncation: "disabled"` on Responses API requests. Here you can drop that field with `patch.drop.truncation`.
+
+It uses VS Code's public `LanguageModelChatProvider` API, adds separate models to the Copilot picker, and does not replace GitHub Copilot's built-in models or the built-in Custom Endpoint UI.
 
 ## Requirements
 
